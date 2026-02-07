@@ -1,0 +1,447 @@
+// Thin CLI client: parses argv, connects to daemon socket, formats output
+
+import * as fs from "node:fs";
+import * as net from "node:net";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import type { Command, Response } from "./protocol.js";
+import { SOCKET_PATH } from "./protocol.js";
+import {
+	formatBreakpointList,
+	formatBreakpointSet,
+	formatFlowStatus,
+	formatJson,
+	formatSource,
+	formatStatus,
+	formatTsv,
+} from "./format.js";
+
+// ─── Parse argv ───
+
+function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
+	// argv[0] = node, argv[1] = script
+	const args = argv.slice(2);
+	if (args.length === 0) {
+		printUsage();
+		return null;
+	}
+
+	const command = args[0];
+
+	if (command === "--help" || command === "-h" || command === "help") {
+		printHelp();
+		return null;
+	}
+
+	const rest = args.slice(1).join(" ");
+	let jsonMode = false;
+
+	// Check for \j suffix on query args
+	let queryArgs = rest;
+	if (queryArgs.endsWith("\\j")) {
+		jsonMode = true;
+		queryArgs = queryArgs.slice(0, -2).trimEnd();
+	}
+
+	switch (command) {
+		case "open":
+			if (!rest) {
+				error("usage: dbg open <port|host:port>");
+				return null;
+			}
+			return { cmd: { cmd: "open", args: rest }, jsonMode };
+
+		case "close":
+			return { cmd: { cmd: "close" }, jsonMode };
+
+		case "run":
+			if (!rest) {
+				error("usage: dbg run <command>");
+				return null;
+			}
+			return { cmd: { cmd: "run", args: rest }, jsonMode };
+
+		case "restart":
+			return { cmd: { cmd: "restart" }, jsonMode };
+
+		case "status":
+			return { cmd: { cmd: "status" }, jsonMode };
+
+		case "c":
+			return { cmd: { cmd: "c" }, jsonMode };
+
+		case "s":
+			return { cmd: { cmd: "s" }, jsonMode };
+
+		case "n":
+			return { cmd: { cmd: "n" }, jsonMode };
+
+		case "o":
+			return { cmd: { cmd: "o" }, jsonMode };
+
+		case "pause":
+			return { cmd: { cmd: "pause" }, jsonMode };
+
+		case "b":
+			if (!rest) {
+				error("usage: dbg b <file:line> [if <condition>]");
+				return null;
+			}
+			return { cmd: { cmd: "b", args: rest }, jsonMode };
+
+		case "db":
+			if (!rest) {
+				error("usage: dbg db <breakpoint-id>");
+				return null;
+			}
+			return { cmd: { cmd: "db", args: rest }, jsonMode };
+
+		case "bl":
+			return { cmd: { cmd: "bl" }, jsonMode };
+
+		case "e":
+			if (!rest) {
+				error("usage: dbg e <expression>");
+				return null;
+			}
+			return { cmd: { cmd: "e", args: rest }, jsonMode };
+
+		case "src":
+			return { cmd: { cmd: "src", args: rest || undefined }, jsonMode };
+
+		case "q":
+			if (!queryArgs) {
+				error("usage: dbg q <query>");
+				return null;
+			}
+			return { cmd: { cmd: "q", args: queryArgs }, jsonMode };
+
+		default:
+			error(`unknown command: ${command}`);
+			printUsage();
+			return null;
+	}
+}
+
+function printUsage(): void {
+	const usage = `usage: dbg <command> [args]
+       dbg --help
+
+commands:
+  open <port|host:port>    Connect to a Node.js debug port
+  close                    Disconnect and shut down daemon
+  run <command>            Spawn process with --inspect-brk and connect
+  restart                  Restart managed process
+  status                   Show connection and pause status
+  c                        Continue execution
+  s                        Step into
+  n                        Step over
+  o                        Step out
+  pause                    Pause execution
+  b <file:line> [if cond]  Set breakpoint
+  db <id>                  Delete breakpoint
+  bl                       List breakpoints
+  e <expression>           Evaluate expression
+  src [file start end]     View source
+  q <query>                Run SQL query
+
+Run 'dbg --help' for detailed usage and examples.`;
+	process.stderr.write(`${usage}\n`);
+}
+
+function printHelp(): void {
+	const help = `dbg - Stateless CLI debugger for AI agents
+
+Every invocation is one command in, one response out, exit.
+A background daemon holds the CDP connection between calls.
+
+LIFECYCLE
+  dbg open <port|host:port>      Attach to a Node.js process already running
+                                 with --inspect or --inspect-brk.
+  dbg open 9229                  Local port.
+  dbg open 192.168.1.5:9229      Remote host.
+  dbg close                      Disconnect from target. If started via 'run',
+                                 also kills the target process.
+  dbg run "<command>"            Spawn a process with --inspect-brk on a free
+                                 port, start daemon, connect.
+  dbg run "node server.ts"       Example.
+  dbg restart                    Kill managed target, respawn same command,
+                                 reconnect, re-apply all breakpoints.
+  dbg status                     Show connection state, pause state, location,
+                                 and PID.
+
+FLOW CONTROL
+  dbg c                          Continue. Blocks until next pause or returns
+                                 'running' if no breakpoint is hit.
+  dbg s                          Step into. Blocks until paused.
+  dbg n                          Step over. Blocks until paused.
+  dbg o                          Step out. Blocks until paused.
+  dbg pause                      Pause execution.
+
+  Output: paused<TAB>file<TAB>line<TAB>function
+     or: running
+
+BREAKPOINTS
+  dbg b <file:line>              Set breakpoint.
+  dbg b app.ts:42                Example.
+  dbg b app.ts:42 if x>0         Conditional breakpoint.
+  dbg db <id>                    Delete breakpoint by ID.
+  dbg bl                         List all breakpoints (TSV).
+
+INSPECTION
+  dbg e "<expression>"           Evaluate expression in current frame.
+  dbg e "process.pid"            Example. Output: bare value, one line.
+  dbg src                        View source around current paused location.
+  dbg src <file> <start> <end>   View specific line range.
+
+QUERY ENGINE (SQL-like)
+  dbg q "<query>"                Run a SQL-like query against virtual tables.
+  dbg q "SELECT * FROM frames"   Stack frames.
+  dbg q "SELECT name, value FROM vars WHERE frame_id = 0"
+
+  Syntax:
+    SELECT [cols | *] FROM <table>
+      [WHERE <conditions>]
+      [ORDER BY <col> [ASC|DESC]]
+      [LIMIT <n>]
+
+  WHERE operators: =, !=, <, >, <=, >=, LIKE, AND, OR, ()
+
+  Virtual tables:
+    frames          Stack frames (id, function, file, line, col, url, script_id)
+    scopes          Scope chains (id, frame_id, type, name, object_id)
+    vars            Variables (frame_id, scope, name, type, value, object_id)
+                    Defaults to frame 0, skips global scope.
+    this            'this' binding per frame (frame_id, type, value, object_id)
+    props           Object properties (requires WHERE object_id=)
+    proto           Prototype chain (requires WHERE object_id=)
+    breakpoints     All breakpoints (id, file, line, condition, hits, enabled)
+    scripts         Loaded scripts (id, file, url, lines, source_map, is_module)
+    source          Source lines (requires WHERE file= or script_id=)
+    console         Console messages (id, type, text, ts, stack)
+    exceptions      Thrown exceptions (id, text, type, file, line, ts, uncaught)
+    async_frames    Async stack traces (id, function, file, line, parent_id)
+    listeners       Event listeners (requires WHERE object_id=)
+
+  Drill-down pattern:
+    dbg q "SELECT name, object_id FROM vars WHERE name = 'config'"
+    dbg q "SELECT name, value FROM props WHERE object_id = '<id>'"
+
+OUTPUT
+  All data goes to stdout. Errors go to stderr.
+  TSV format by default. Append \\j to any query for JSON output:
+    dbg q "SELECT * FROM frames\\j"
+  Exit code 0 on success, 1 on error.`;
+	process.stdout.write(`${help}\n`);
+}
+
+// ─── Daemon management ───
+
+function isDaemonRunning(): Promise<boolean> {
+	return new Promise((resolve) => {
+		if (!fs.existsSync(SOCKET_PATH)) {
+			resolve(false);
+			return;
+		}
+		const socket = net.createConnection(SOCKET_PATH);
+		socket.on("connect", () => {
+			socket.destroy();
+			resolve(true);
+		});
+		socket.on("error", () => {
+			resolve(false);
+		});
+		socket.setTimeout(1000, () => {
+			socket.destroy();
+			resolve(false);
+		});
+	});
+}
+
+async function ensureDaemon(): Promise<void> {
+	if (await isDaemonRunning()) return;
+
+	// Clean up stale socket file
+	try {
+		fs.unlinkSync(SOCKET_PATH);
+	} catch {
+		// doesn't exist
+	}
+
+	const thisFile = fileURLToPath(import.meta.url);
+	const thisDir = dirname(thisFile);
+	const daemonPath = join(thisDir, "daemon.js");
+
+	// Spawn daemon fully detached — no pipes, no IPC
+	const child = fork(daemonPath, [], {
+		detached: true,
+		stdio: "ignore",
+	});
+	child.unref();
+	child.disconnect?.();
+
+	// Poll for socket to appear (daemon creates it on startup)
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		await new Promise((r) => setTimeout(r, 100));
+		if (fs.existsSync(SOCKET_PATH)) {
+			// Verify we can connect
+			if (await isDaemonRunning()) return;
+		}
+	}
+	throw new Error("daemon failed to start (socket not created)");
+}
+
+// ─── Socket communication ───
+
+function sendCommand(cmd: Command): Promise<Response> {
+	return new Promise((resolve, reject) => {
+		const socket = net.createConnection(SOCKET_PATH);
+		let buffer = "";
+
+		socket.on("connect", () => {
+			socket.write(`${JSON.stringify(cmd)}\n`);
+		});
+
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString();
+			const newlineIdx = buffer.indexOf("\n");
+			if (newlineIdx !== -1) {
+				const line = buffer.slice(0, newlineIdx);
+				try {
+					const response = JSON.parse(line) as Response;
+					socket.destroy();
+					resolve(response);
+				} catch {
+					socket.destroy();
+					reject(new Error("invalid response from daemon"));
+				}
+			}
+		});
+
+		socket.on("error", (err) => {
+			reject(
+				new Error(
+					`cannot connect to daemon: ${err.message}. Is it running?`,
+				),
+			);
+		});
+
+		socket.setTimeout(60000, () => {
+			socket.destroy();
+			reject(new Error("timeout waiting for daemon response"));
+		});
+	});
+}
+
+// ─── Output formatting ───
+
+function formatResponse(cmd: Command, response: Response, jsonMode: boolean): string {
+	if (!response.ok) return "";
+
+	const r = response;
+
+	// Query results (tabular data)
+	if (r.columns && r.rows) {
+		return jsonMode
+			? formatJson(r.columns, r.rows)
+			: formatTsv(r.columns, r.rows);
+	}
+
+	// Flow commands (c, s, n, o, pause)
+	if (r.status && ["c", "s", "n", "o", "pause"].includes(cmd.cmd)) {
+		return formatFlowStatus(r.status, r.file, r.line, r.function);
+	}
+
+	// Status command
+	if (cmd.cmd === "status") {
+		return formatStatus(
+			r.connected ?? false,
+			r.status === "paused",
+			r.file,
+			r.line,
+			r.function,
+			r.pid,
+		);
+	}
+
+	// Breakpoint set
+	if (cmd.cmd === "b" && r.id && r.file !== undefined && r.line !== undefined) {
+		return formatBreakpointSet(r.id, r.file, r.line);
+	}
+
+	// Breakpoint list (handled above via columns/rows)
+
+	// Eval result — bare value, single line
+	if (cmd.cmd === "e" && r.value !== undefined) {
+		return r.value;
+	}
+
+	// Source view
+	if (cmd.cmd === "src" && r.value !== undefined) {
+		return r.value;
+	}
+
+	// Messages (run, restart, close, open)
+	if (r.messages) {
+		return r.messages.join("\n");
+	}
+
+	return "";
+}
+
+// ─── Main ───
+
+async function main(): Promise<void> {
+	const rawArgs = process.argv.slice(2);
+	if (rawArgs.length === 0) {
+		printUsage();
+		process.exit(1);
+	}
+	if (rawArgs[0] === "--help" || rawArgs[0] === "-h" || rawArgs[0] === "help") {
+		printHelp();
+		process.exit(0);
+	}
+
+	const parsed = parseArgs(process.argv);
+	if (!parsed) {
+		process.exit(1);
+	}
+
+	const { cmd, jsonMode } = parsed;
+
+	// Auto-start daemon for commands that need it
+	const needsDaemon = cmd.cmd !== "close";
+	if (needsDaemon) {
+		try {
+			await ensureDaemon();
+		} catch (e) {
+			error((e as Error).message);
+			process.exit(1);
+		}
+	}
+
+	try {
+		const response = await sendCommand(cmd);
+
+		if (!response.ok) {
+			error(response.error);
+			process.exit(1);
+		}
+
+		const output = formatResponse(cmd, response, jsonMode);
+		if (output) {
+			process.stdout.write(`${output}\n`);
+		}
+	} catch (e) {
+		error((e as Error).message);
+		process.exit(1);
+	}
+}
+
+function error(msg: string): void {
+	process.stderr.write(`error: ${msg}\n`);
+}
+
+main();

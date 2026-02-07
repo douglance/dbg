@@ -1,0 +1,28 @@
+{
+  "name": "dbg",
+  "version": "0.1.0",
+  "description": "Stateless CLI debugger for AI agents",
+  "type": "module",
+  "bin": {
+    "dbg": "./bin/dbg"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src/",
+    "format": "biome format --write src/",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.13.1",
+    "devtools-protocol": "^0.0.1581282",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
