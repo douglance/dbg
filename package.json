@@ -1,7 +1,7 @@
 {
   "name": "dbg",
   "version": "0.1.0",
-  "description": "Stateless CLI debugger for AI agents",
+  "description": "Stateless, non-interactive Node.js debugger built for automation",
   "type": "module",
   "bin": {
     "dbg": "./bin/dbg"
