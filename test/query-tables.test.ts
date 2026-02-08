@@ -232,7 +232,7 @@ describe("query tables", () => {
 	it("walks proto table chain until null prototype", async () => {
 		const state = createState();
 		const { executor } = createExecutor(state, (_method, params) => {
-			const id = String((params ?? {}).objectId);
+			const id = String(params?.objectId);
 			if (id === "start") {
 				return {
 					internalProperties: [

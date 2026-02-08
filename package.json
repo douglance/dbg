@@ -27,7 +27,9 @@
     "lint": "biome lint --error-on-warnings src test tsup.config.ts vitest.config.ts",
     "lint:fix": "biome lint --write --unsafe src test tsup.config.ts vitest.config.ts",
     "format": "biome format --write src/",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "format:check": "biome format --error-on-warnings src test tsup.config.ts vitest.config.ts",
+    "ci": "npm run lint && npm run format:check && npm run check && npm run build && npm test"
   },
   "dependencies": {
     "chrome-remote-interface": "^0.33.2"
