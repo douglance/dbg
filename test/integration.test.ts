@@ -5,9 +5,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const CLI = path.resolve(__dirname, "../dist/cli.js");
-const DAEMON = path.resolve(__dirname, "../dist/daemon.js");
 const SOCKET_PATH = "/tmp/dbg.sock";
 const TARGET = path.resolve(__dirname, "fixtures/target.js");
+const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-events.db");
 
 // ─── Helpers ───
 
@@ -16,13 +16,18 @@ function dbg(...args: string[]): { stdout: string; stderr: string; exitCode: num
 		const stdout = execFileSync(process.execPath, [CLI, ...args], {
 			encoding: "utf8",
 			timeout: 15000,
+			env: {
+				...process.env,
+				DBG_EVENTS_DB: EVENTS_DB_PATH,
+			},
 		});
 		return { stdout, stderr: "", exitCode: 0 };
-	} catch (e: any) {
+	} catch (e: unknown) {
+		const err = e as { stdout?: string; stderr?: string; status?: number };
 		return {
-			stdout: e.stdout ?? "",
-			stderr: e.stderr ?? "",
-			exitCode: e.status ?? 1,
+			stdout: err.stdout ?? "",
+			stderr: err.stderr ?? "",
+			exitCode: err.status ?? 1,
 		};
 	}
 }
@@ -52,6 +57,10 @@ function killDaemon(): void {
 				execFileSync(process.execPath, [CLI, "close"], {
 					encoding: "utf8",
 					timeout: 5000,
+					env: {
+						...process.env,
+						DBG_EVENTS_DB: EVENTS_DB_PATH,
+					},
 				});
 			} catch {
 				// ignore
@@ -60,6 +69,25 @@ function killDaemon(): void {
 	} catch {
 		// ignore
 	}
+
+	// Kill any lingering daemon processes (find via socket)
+	try {
+		const pids = execFileSync("lsof", ["-t", SOCKET_PATH], {
+			encoding: "utf8",
+			timeout: 3000,
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		for (const pid of pids.split("\n").filter(Boolean)) {
+			try {
+				process.kill(Number.parseInt(pid, 10), "SIGTERM");
+			} catch {
+				// already dead
+			}
+		}
+	} catch {
+		// no process on socket
+	}
+
 	// Remove stale socket
 	try {
 		fs.unlinkSync(SOCKET_PATH);
@@ -119,6 +147,15 @@ describe("integration", () => {
 
 		// Small delay so sockets release
 		await sleep(200);
+
+		// Remove event store db and WAL files between tests
+		for (const suffix of ["", "-wal", "-shm"]) {
+			try {
+				fs.unlinkSync(EVENTS_DB_PATH + suffix);
+			} catch {
+				// ignore
+			}
+		}
 	});
 
 	afterAll(() => {
@@ -136,8 +173,15 @@ describe("integration", () => {
 		return new Promise((resolve, reject) => {
 			let stderr = "";
 			const timeout = setTimeout(() => reject(new Error("target did not start")), 10000);
+			const child = targetProcess;
 
-			targetProcess!.stderr!.on("data", (chunk: Buffer) => {
+			if (!child?.stderr) {
+				clearTimeout(timeout);
+				reject(new Error("target process stderr is unavailable"));
+				return;
+			}
+
+			child.stderr.on("data", (chunk: Buffer) => {
 				stderr += chunk.toString();
 				const match = stderr.match(/Debugger listening on ws:\/\/[\w.]+:(\d+)\//);
 				if (match) {
@@ -146,7 +190,7 @@ describe("integration", () => {
 				}
 			});
 
-			targetProcess!.on("error", (err) => {
+			child.on("error", (err) => {
 				clearTimeout(timeout);
 				reject(err);
 			});
@@ -284,5 +328,47 @@ describe("integration", () => {
 		expect(status.stdout).toContain("connected");
 		expect(status.stdout).toContain("paused");
 		expect(status.stdout).toContain("pid=");
+	});
+
+	it("shows recent CDP trace events", async () => {
+		const port = await spawnTarget();
+		dbg("open", String(port));
+
+		const stepResult = dbg("n");
+		expect(stepResult.exitCode).toBe(0);
+
+		const trace = dbg("trace", "20");
+		expect(trace.exitCode).toBe(0);
+		expect(trace.stdout).toContain("id\tts\tdirection\tmethod\tlatency_ms\terror\tdata");
+		expect(trace.stdout).toContain("Debugger.stepOver");
+	});
+
+	it("reports health and latency", async () => {
+		const port = await spawnTarget();
+		dbg("open", String(port));
+
+		const health = dbg("health");
+		expect(health.exitCode).toBe(0);
+		expect(health.stdout.trim()).toMatch(/^healthy \(\d+ms\)$/);
+	});
+
+	it("health fails when disconnected", () => {
+		const health = dbg("health");
+		expect(health.exitCode).toBe(1);
+		expect(health.stderr).toContain("not connected");
+	});
+
+	it("queries event store virtual tables", async () => {
+		const port = await spawnTarget();
+		dbg("open", String(port));
+		dbg("n");
+
+		const events = dbg("q", "SELECT source, category, method FROM events LIMIT 5");
+		expect(events.exitCode).toBe(0);
+		expect(events.stdout).toContain("source\tcategory\tmethod");
+
+		const cdp = dbg("q", "SELECT method, direction FROM cdp LIMIT 5");
+		expect(cdp.exitCode).toBe(0);
+		expect(cdp.stdout).toContain("method\tdirection");
 	});
 });

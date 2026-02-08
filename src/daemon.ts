@@ -9,18 +9,22 @@ import {
 	handleContinue,
 	handleDeleteBreakpoint,
 	handleEval,
+	handleHealth,
 	handleListBreakpoints,
 	handlePause,
+	handleReconnect,
 	handleSetBreakpoint,
 	handleSource,
 	handleStatus,
 	handleStepInto,
 	handleStepOut,
 	handleStepOver,
+	handleTrace,
 } from "./commands.js";
 import { killTarget, spawnTarget } from "./process.js";
 import type { Command, DaemonState, Response, StoredBreakpoint } from "./protocol.js";
 import { SOCKET_PATH } from "./protocol.js";
+import { EventStore } from "./store.js";
 
 import type { ChildProcess } from "node:child_process";
 
@@ -32,6 +36,7 @@ function createState(): DaemonState {
 		paused: false,
 		pid: null,
 		managedCommand: null,
+		lastWsUrl: null,
 		callFrames: [],
 		asyncStackTrace: [],
 		breakpoints: new Map(),
@@ -42,8 +47,18 @@ function createState(): DaemonState {
 }
 
 let state = createState();
-let cdp = new CdpClientWrapper(state);
+const store = new EventStore();
+let cdp = new CdpClientWrapper(state, store);
 let managedChild: ChildProcess | null = null;
+store.record(
+	{
+		source: "daemon",
+		category: "lifecycle",
+		method: "daemon.start",
+		data: { pid: process.pid },
+	},
+	true,
+);
 
 // ─── Lifecycle commands ───
 
@@ -70,6 +85,7 @@ async function handleOpen(args: string): Promise<Response> {
 	try {
 		const wsUrl = await discoverTarget(port, host);
 		await cdp.connect(wsUrl);
+		state.lastWsUrl = wsUrl;
 		return {
 			ok: true,
 			connected: true,
@@ -90,7 +106,7 @@ async function handleClose(): Promise<Response> {
 
 	const prevPid = state.pid;
 	state = createState();
-	cdp = new CdpClientWrapper(state);
+	cdp = new CdpClientWrapper(state, store);
 
 	return {
 		ok: true,
@@ -118,6 +134,7 @@ async function handleRun(command: string): Promise<Response> {
 
 		const wsUrl = await discoverTarget(port);
 		await cdp.connect(wsUrl);
+		state.lastWsUrl = wsUrl;
 
 		return {
 			ok: true,
@@ -149,7 +166,7 @@ async function handleRestart(): Promise<Response> {
 	// Reset state but remember the command
 	state = createState();
 	state.managedCommand = command;
-	cdp = new CdpClientWrapper(state);
+	cdp = new CdpClientWrapper(state, store);
 
 	// Respawn
 	try {
@@ -165,6 +182,7 @@ async function handleRestart(): Promise<Response> {
 
 		const wsUrl = await discoverTarget(port);
 		await cdp.connect(wsUrl);
+		state.lastWsUrl = wsUrl;
 
 		// Re-apply breakpoints using setBreakpointByUrl so they auto-apply
 		// when matching scripts load (we're paused at line 0, scripts not loaded yet)
@@ -250,6 +268,12 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleEval(cdp, state, cmd.args);
 		case "src":
 			return handleSource(cdp, state, cmd.args);
+		case "trace":
+			return handleTrace(store, cmd.args);
+		case "health":
+			return handleHealth(cdp, state);
+		case "reconnect":
+			return handleReconnect(cdp, state, store);
 		case "q":
 			return handleQuery(cmd.args);
 		default:
@@ -293,8 +317,9 @@ function startServer(): void {
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString();
 			// Process complete lines
-			let newlineIdx: number;
-			while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+			while (true) {
+				const newlineIdx = buffer.indexOf("\n");
+				if (newlineIdx === -1) break;
 				const line = buffer.slice(0, newlineIdx);
 				buffer = buffer.slice(newlineIdx + 1);
 				if (!line.trim()) continue;
@@ -321,6 +346,15 @@ function startServer(): void {
 
 	// Cleanup on exit
 	function cleanup() {
+		store.record(
+			{
+				source: "daemon",
+				category: "lifecycle",
+				method: "daemon.stop",
+				data: { pid: process.pid },
+			},
+			true,
+		);
 		try {
 			fs.unlinkSync(SOCKET_PATH);
 		} catch {
@@ -330,6 +364,7 @@ function startServer(): void {
 			killTarget(managedChild);
 		}
 		cdp.disconnect();
+		store.close();
 		server.close();
 	}
 

@@ -110,6 +110,15 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 		case "src":
 			return { cmd: { cmd: "src", args: rest || undefined }, jsonMode };
 
+		case "trace":
+			return { cmd: { cmd: "trace", args: queryArgs || undefined }, jsonMode };
+
+		case "health":
+			return { cmd: { cmd: "health" }, jsonMode };
+
+		case "reconnect":
+			return { cmd: { cmd: "reconnect" }, jsonMode };
+
 		case "q":
 			if (!queryArgs) {
 				error("usage: dbg q <query>");
@@ -144,6 +153,9 @@ commands:
   bl                       List breakpoints
   e <expression>           Evaluate expression
   src [file start end]     View source
+  trace [limit]            Show recent CDP messages
+  health                   Verify debugger connection health
+  reconnect                Reconnect to last websocket target
   q <query>                Run SQL query
 
 Run 'dbg --help' for detailed usage and examples.`;
@@ -194,6 +206,9 @@ INSPECTION
   dbg e "process.pid"            Example. Output: bare value, one line.
   dbg src                        View source around current paused location.
   dbg src <file> <start> <end>   View specific line range.
+  dbg trace [limit]              Show recent CDP send/recv history.
+  dbg health                     Probe Runtime.evaluate("1+1"), report latency.
+  dbg reconnect                  Reconnect to the last known websocket URL.
 
 QUERY ENGINE (SQL-like)
   dbg q "<query>"                Run a SQL-like query against virtual tables.
@@ -223,6 +238,10 @@ QUERY ENGINE (SQL-like)
     exceptions      Thrown exceptions (id, text, type, file, line, ts, uncaught)
     async_frames    Async stack traces (id, function, file, line, parent_id)
     listeners       Event listeners (requires WHERE object_id=)
+    events          Raw daemon/CDP event log (id, ts, source, category, method, data, session_id)
+    cdp             CDP-focused event view (id, ts, direction, method, latency_ms, error, data)
+    cdp_messages    Alias of cdp
+    connections     Connection lifecycle events (id, ts, event, session_id, data)
 
   Drill-down pattern:
     dbg q "SELECT name, object_id FROM vars WHERE name = 'config'"

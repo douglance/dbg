@@ -26,8 +26,9 @@ function extractFilter(where: WhereExpr | null, column: string): FilterMatch | n
 }
 
 function matchesLike(value: string, pattern: string): boolean {
+	const escaped = String(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const regex = new RegExp(
-		`^${String(pattern).replace(/%/g, ".*").replace(/_/g, ".")}$`,
+		`^${escaped.replace(/%/g, ".*").replace(/_/g, ".")}$`,
 		"i",
 	);
 	return regex.test(value);

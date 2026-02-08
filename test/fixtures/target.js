@@ -7,7 +7,7 @@ const sum = x + y;    // line 6
 console.log("sum:", sum); // line 7
 
 function greet(name) {  // line 9
-  const msg = "hello " + name; // line 10
+  const msg = `hello ${name}`; // line 10
   return msg;           // line 11
 }
 

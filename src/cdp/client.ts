@@ -4,13 +4,11 @@
 import type { EventEmitter } from "node:events";
 import type {
 	AsyncFrameInfo,
-	CallFrameInfo,
 	CdpExecutor,
-	ConsoleEntry,
 	DaemonState,
-	ExceptionEntry,
 	ScriptInfo,
 } from "../protocol.js";
+import type { EventStore } from "../store.js";
 
 // chrome-remote-interface has no types; declare what we use
 interface CdpClient extends EventEmitter {
@@ -44,6 +42,7 @@ interface CdpClient extends EventEmitter {
 	};
 	close(): Promise<void>;
 	send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+	emit(eventName: string | symbol, ...args: unknown[]): boolean;
 	on(event: string, listener: (...args: unknown[]) => void): this;
 	once(event: string, listener: (...args: unknown[]) => void): this;
 	removeListener(event: string, listener: (...args: unknown[]) => void): this;
@@ -52,43 +51,65 @@ interface CdpClient extends EventEmitter {
 export class CdpClientWrapper implements CdpExecutor {
 	private client: CdpClient | null = null;
 	private state: DaemonState;
+	private store: EventStore | null;
 	private consoleId = 0;
 	private exceptionId = 0;
 	private asyncFrameId = 0;
+	private sessionId: string | null = null;
 
-	constructor(state: DaemonState) {
+	constructor(state: DaemonState, store?: EventStore | null) {
 		this.state = state;
+		this.store = store ?? null;
 	}
 
 	async connect(wsUrl: string): Promise<void> {
-		const CDP = (await import("chrome-remote-interface")).default;
-		// Use local: true to skip protocol fetching from target
-		this.client = (await CDP({ target: wsUrl, local: true })) as unknown as CdpClient;
+		this.sessionId = createSessionId();
+		this.recordConnection("connect.start", { wsUrl }, true);
 
-		this.setupEventHandlers();
+		try {
+			const CDP = (await import("chrome-remote-interface")).default;
+			// Use local: true to skip protocol fetching from target
+			this.client = (await CDP({ target: wsUrl, local: true })) as unknown as CdpClient;
 
-		// Enable domains with timeouts — some inspectors (e.g. SpacetimeDB)
-		// don't implement all domains and will hang on enable().
-		await this.enableDomain("Debugger");
-		await this.enableDomain("Runtime");
-		this.state.connected = true;
+			this.setupEventHandlers();
 
-		// If target was started with --inspect-brk, it's waiting for a debugger.
-		// runIfWaitingForDebugger tells V8 to proceed — which immediately hits
-		// the implicit breakpoint and fires Debugger.paused.
-		await this.trySend("Runtime.runIfWaitingForDebugger", {});
+			// Enable domains with timeouts — some inspectors (e.g. SpacetimeDB)
+			// don't implement all domains and will hang on enable().
+			await this.enableDomain("Debugger");
+			await this.enableDomain("Runtime");
+			this.state.connected = true;
 
-		// Give the paused event a moment to arrive
-		await new Promise((resolve) => setTimeout(resolve, 100));
+			// If target was started with --inspect-brk, it's waiting for a debugger.
+			// runIfWaitingForDebugger tells V8 to proceed — which immediately hits
+			// the implicit breakpoint and fires Debugger.paused.
+			await this.trySend("Runtime.runIfWaitingForDebugger", {});
+
+			// Give the paused event a moment to arrive
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			this.recordConnection("connect.success", { wsUrl }, true);
+		} catch (error) {
+			this.recordConnection(
+				"connect.error",
+				{ wsUrl, error: toErrorMessage(error) },
+				true,
+			);
+			if (this.client) {
+				try {
+					await this.client.close();
+				} catch {
+					// ignore close errors
+				}
+				this.client = null;
+			}
+			this.state.connected = false;
+			this.sessionId = null;
+			throw error;
+		}
 	}
 
 	private async enableDomain(domain: string): Promise<void> {
 		try {
-			await withTimeout(
-				this.client!.send(`${domain}.enable`, {}),
-				5000,
-				`${domain}.enable timed out`,
-			);
+			await this.sendWithTimeout(`${domain}.enable`, {}, 5000);
 		} catch {
 			// Non-fatal: target may not support this domain
 		}
@@ -100,11 +121,7 @@ export class CdpClientWrapper implements CdpExecutor {
 		params?: Record<string, unknown>,
 	): Promise<unknown> {
 		try {
-			return await withTimeout(
-				this.client!.send(method, params),
-				5000,
-				`${method} timed out`,
-			);
+			return await this.sendWithTimeout(method, params, 5000);
 		} catch {
 			return undefined;
 		}
@@ -113,6 +130,7 @@ export class CdpClientWrapper implements CdpExecutor {
 	private setupEventHandlers(): void {
 		const client = this.client;
 		if (!client) return;
+		this.interceptClientEmit(client);
 
 		client.on("Debugger.paused", (params: unknown) => {
 			const p = params as {
@@ -244,6 +262,16 @@ export class CdpClientWrapper implements CdpExecutor {
 		});
 	}
 
+	private interceptClientEmit(client: CdpClient): void {
+		const originalEmit = client.emit.bind(client);
+		client.emit = ((eventName: string | symbol, ...args: unknown[]) => {
+			if (typeof eventName === "string" && eventName.includes(".")) {
+				this.recordCdp("cdp_recv", eventName, { event: args[0] });
+			}
+			return originalEmit(eventName, ...args);
+		}) as typeof client.emit;
+	}
+
 	private parseAsyncStackTrace(trace: {
 		description?: string;
 		callFrames: Array<{
@@ -277,12 +305,15 @@ export class CdpClientWrapper implements CdpExecutor {
 		method: string,
 		params?: Record<string, unknown>,
 	): Promise<unknown> {
-		if (!this.client) throw new Error("not connected");
-		return this.client.send(method, params);
+		return this.sendWithTimeout(method, params);
 	}
 
 	getState(): DaemonState {
 		return this.state;
+	}
+
+	getStore(): EventStore | null {
+		return this.store;
 	}
 
 	getClient(): CdpClient | null {
@@ -309,6 +340,10 @@ export class CdpClientWrapper implements CdpExecutor {
 	}
 
 	async disconnect(): Promise<void> {
+		if (this.client || this.state.connected) {
+			this.recordConnection("disconnect", {}, true);
+		}
+
 		if (this.client) {
 			try {
 				await this.client.close();
@@ -321,10 +356,80 @@ export class CdpClientWrapper implements CdpExecutor {
 		this.state.paused = false;
 		this.state.callFrames = [];
 		this.state.asyncStackTrace = [];
+		this.sessionId = null;
 	}
 
 	isConnected(): boolean {
 		return this.client !== null && this.state.connected;
+	}
+
+	private async sendWithTimeout(
+		method: string,
+		params?: Record<string, unknown>,
+		timeoutMs?: number,
+	): Promise<unknown> {
+		const client = this.client;
+		if (!client) throw new Error("not connected");
+
+		const started = Date.now();
+		this.recordCdp("cdp_send", method, { params });
+
+		try {
+			const request = client.send(method, params);
+			const response = timeoutMs
+				? await withTimeout(request, timeoutMs, `${method} timed out`)
+				: await request;
+			const latencyMs = Date.now() - started;
+			this.recordCdp("cdp_recv", method, { response, latencyMs });
+			return response;
+		} catch (error) {
+			const latencyMs = Date.now() - started;
+			this.recordCdp(
+				"cdp_recv",
+				method,
+				{
+					error: toErrorMessage(error),
+					latencyMs,
+				},
+				true,
+			);
+			throw error;
+		}
+	}
+
+	private recordConnection(
+		method: string,
+		data: unknown,
+		flushNow = false,
+	): void {
+		this.store?.record(
+			{
+				source: "cdp_client",
+				category: "connection",
+				method,
+				data,
+				sessionId: this.sessionId,
+			},
+			flushNow,
+		);
+	}
+
+	private recordCdp(
+		source: "cdp_send" | "cdp_recv",
+		method: string,
+		data: unknown,
+		flushNow = false,
+	): void {
+		this.store?.record(
+			{
+				source,
+				category: "cdp",
+				method,
+				data,
+				sessionId: this.sessionId,
+			},
+			flushNow,
+		);
 	}
 }
 
@@ -363,4 +468,13 @@ function extractFilename(url: string): string {
 	// Return last path segment
 	const parts = clean.split("/");
 	return parts[parts.length - 1] || url;
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
+function createSessionId(): string {
+	return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }

@@ -10,7 +10,8 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "biome check src/",
+    "lint": "biome lint --error-on-warnings src test tsup.config.ts vitest.config.ts",
+    "lint:fix": "biome lint --write --unsafe src test tsup.config.ts vitest.config.ts",
     "format": "biome format --write src/",
     "check": "tsc --noEmit"
   },

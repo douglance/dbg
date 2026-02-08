@@ -15,6 +15,9 @@ import { consoleTable } from "./console.js";
 import { exceptionsTable } from "./exceptions.js";
 import { asyncFramesTable } from "./async_frames.js";
 import { listenersTable } from "./listeners.js";
+import { eventsTable } from "./events.js";
+import { cdpMessagesTable, cdpTable } from "./cdp_messages.js";
+import { connectionsTable } from "./connections.js";
 
 export interface VirtualTable {
 	name: string;
@@ -45,6 +48,10 @@ register(consoleTable);
 register(exceptionsTable);
 register(asyncFramesTable);
 register(listenersTable);
+register(eventsTable);
+register(cdpTable);
+register(cdpMessagesTable);
+register(connectionsTable);
 
 export function getTable(name: string): VirtualTable | undefined {
 	return tables.get(name);

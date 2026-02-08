@@ -3,6 +3,7 @@
 
 import type { CdpClientWrapper } from "./cdp/client.js";
 import type { DaemonState, Response, StoredBreakpoint } from "./protocol.js";
+import type { EventStore } from "./store.js";
 
 // ─── Flow commands ───
 
@@ -28,6 +29,147 @@ export async function handleStatus(
 		function: frame?.functionName,
 		pid: state.pid ?? undefined,
 	};
+}
+
+export async function handleTrace(
+	store: EventStore,
+	args?: string,
+): Promise<Response> {
+	const limit = parseTraceLimit(args);
+	if (!Number.isInteger(limit) || limit < 1) {
+		return { ok: false, error: "usage: dbg trace [limit]" };
+	}
+
+	const rows = store.query(
+		`
+		SELECT
+			id,
+			ts,
+			CASE
+				WHEN source = 'cdp_send' THEN 'send'
+				WHEN source = 'cdp_recv' THEN 'recv'
+				ELSE source
+			END AS direction,
+			method,
+			json_extract(data, '$.latencyMs') AS latency_ms,
+			json_extract(data, '$.error') AS error,
+			data
+		FROM events
+		WHERE category = 'cdp'
+		ORDER BY id DESC
+		LIMIT ?
+	`,
+		[limit],
+	);
+
+	return {
+		ok: true,
+		columns: ["id", "ts", "direction", "method", "latency_ms", "error", "data"],
+		rows: rows.map((row) => [
+			row.id,
+			row.ts,
+			row.direction,
+			row.method,
+			row.latency_ms,
+			row.error,
+			row.data,
+		]),
+	};
+}
+
+export async function handleHealth(
+	cdp: CdpClientWrapper,
+	state: DaemonState,
+): Promise<Response> {
+	if (!state.connected) return { ok: false, error: "not connected" };
+
+	const started = Date.now();
+	try {
+		const result = (await withTimeout(
+			cdp.send("Runtime.evaluate", { expression: "1+1", returnByValue: true }),
+			2000,
+		)) as {
+			result: { value?: unknown };
+			exceptionDetails?: { text: string };
+		};
+
+		if (result.exceptionDetails) {
+			return { ok: false, error: `health check failed: ${result.exceptionDetails.text}` };
+		}
+		if (result.result.value !== 2) {
+			return {
+				ok: false,
+				error: `health check failed: unexpected result ${JSON.stringify(result.result.value)}`,
+			};
+		}
+
+		const latencyMs = Date.now() - started;
+		return {
+			ok: true,
+			latencyMs,
+			messages: [`healthy (${latencyMs}ms)`],
+		};
+	} catch (error) {
+		const message = (error as Error).message;
+		if (message === "timed out") {
+			return { ok: false, error: "health check timed out after 2000ms" };
+		}
+		return { ok: false, error: `health check failed: ${message}` };
+	}
+}
+
+export async function handleReconnect(
+	cdp: CdpClientWrapper,
+	state: DaemonState,
+	store: EventStore,
+): Promise<Response> {
+	if (!state.lastWsUrl) {
+		return { ok: false, error: "no previous websocket URL available" };
+	}
+
+	store.record(
+		{
+			source: "daemon",
+			category: "connection",
+			method: "reconnect.start",
+			data: { wsUrl: state.lastWsUrl },
+		},
+		true,
+	);
+
+	try {
+		await cdp.disconnect();
+		await cdp.connect(state.lastWsUrl);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "reconnect.success",
+				data: { wsUrl: state.lastWsUrl },
+			},
+			true,
+		);
+		return {
+			ok: true,
+			connected: true,
+			status: state.paused ? "paused" : "running",
+			messages: ["reconnected"],
+		};
+	} catch (error) {
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "reconnect.error",
+				data: {
+					wsUrl: state.lastWsUrl,
+					error: (error as Error).message,
+				},
+			},
+			true,
+		);
+		return { ok: false, error: `reconnect failed: ${(error as Error).message}` };
+	}
 }
 
 export async function handleContinue(
@@ -396,4 +538,31 @@ function findScript(state: DaemonState, pattern: string): string | undefined {
 
 function escapeRegex(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseTraceLimit(args?: string): number {
+	if (!args) return 50;
+	const trimmed = args.trim();
+	if (!trimmed) return 50;
+	const parsed = Number.parseInt(trimmed, 10);
+	if (Number.isNaN(parsed)) return -1;
+	return Math.min(parsed, 1000);
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => {
+			reject(new Error("timed out"));
+		}, timeoutMs);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(error) => {
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
 }

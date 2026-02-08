@@ -49,14 +49,18 @@ describe("parser", () => {
 		const q = parseQuery(
 			"SELECT * FROM source WHERE file = 'a.ts' AND line >= 10",
 		);
-		expect(q.where!.type).toBe("and");
+		expect(q.where).not.toBeNull();
+		if (!q.where) throw new Error("Expected WHERE clause");
+		expect(q.where.type).toBe("and");
 	});
 
 	it("parses WHERE with OR", () => {
 		const q = parseQuery(
 			"SELECT * FROM vars WHERE name = 'x' OR name = 'y'",
 		);
-		expect(q.where!.type).toBe("or");
+		expect(q.where).not.toBeNull();
+		if (!q.where) throw new Error("Expected WHERE clause");
+		expect(q.where.type).toBe("or");
 	});
 
 	it("parses ORDER BY", () => {
@@ -75,7 +79,9 @@ describe("parser", () => {
 		);
 		expect(q.columns).toEqual(["name", "value"]);
 		expect(q.table).toBe("vars");
-		expect(q.where!.type).toBe("and");
+		expect(q.where).not.toBeNull();
+		if (!q.where) throw new Error("Expected WHERE clause");
+		expect(q.where.type).toBe("and");
 		expect(q.orderBy).toEqual({ column: "name", direction: "ASC" });
 		expect(q.limit).toBe(20);
 	});
@@ -90,6 +96,8 @@ describe("parser", () => {
 		const q = parseQuery(
 			"SELECT * FROM vars WHERE (name = 'x' OR name = 'y') AND frame_id = 0",
 		);
-		expect(q.where!.type).toBe("and");
+		expect(q.where).not.toBeNull();
+		if (!q.where) throw new Error("Expected WHERE clause");
+		expect(q.where.type).toBe("and");
 	});
 });

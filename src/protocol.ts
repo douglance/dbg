@@ -1,3 +1,5 @@
+import type { EventStore } from "./store.js";
+
 // CLI <-> Daemon protocol types
 // Shared between cli.ts and daemon.ts
 
@@ -21,6 +23,9 @@ export type Command =
 	| { cmd: "bl" } // list breakpoints
 	| { cmd: "e"; args: string } // expression
 	| { cmd: "src"; args?: string } // optional "file line_start line_end"
+	| { cmd: "trace"; args?: string }
+	| { cmd: "health" }
+	| { cmd: "reconnect" }
 	| { cmd: "q"; args: string }; // SQL query
 
 // ─── Daemon → CLI response ───
@@ -45,6 +50,7 @@ export interface OkResponse {
 	pid?: number;
 	// Run/restart
 	messages?: string[];
+	latencyMs?: number;
 }
 
 export interface ErrResponse {
@@ -98,6 +104,7 @@ export interface DaemonState {
 	paused: boolean;
 	pid: number | null;
 	managedCommand: string | null; // non-null if started via `dbg run`
+	lastWsUrl: string | null;
 
 	// CDP state (populated when paused)
 	callFrames: CallFrameInfo[];
@@ -142,4 +149,5 @@ export interface AsyncFrameInfo {
 export interface CdpExecutor {
 	send(method: string, params?: Record<string, unknown>): Promise<unknown>;
 	getState(): DaemonState;
+	getStore?(): EventStore | null;
 }
