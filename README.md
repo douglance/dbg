@@ -22,7 +22,8 @@ Traditional debuggers are interactive. They assume a human is sitting at a termi
 
 - **Stateless CLI** — every call is independent. No session to manage.
 - **Machine-readable output** — TSV by default, JSON with `\j`. No color, no decoration, no unicode.
-- **SQL query engine** — `SELECT name, value FROM vars WHERE frame_id = 0`. Thirteen virtual tables expose everything the debugger can see.
+- **SQL query engine** — `SELECT name, value FROM vars WHERE frame_id = 0`. Sixteen virtual tables expose everything the debugger can see.
+- **Event store** — every CDP message, connection event, and daemon lifecycle action is logged to SQLite for post-hoc analysis.
 - **Background daemon** — a thin daemon holds the CDP connection between calls. The CLI is just a client.
 - **Exit codes** — 0 or 1. Parse stdout, check the code, move on.
 
@@ -31,6 +32,16 @@ Traditional debuggers are interactive. They assume a human is sitting at a termi
 ```sh
 npm install -g dbg
 ```
+
+### As a Claude Code Skill
+
+Install the [Agent Skill](https://agentskills.io) to give Claude Code the ability to debug Node.js processes:
+
+```sh
+npx skills add douglance/dbg
+```
+
+This adds the `dbg` skill so Claude can autonomously attach to processes, set breakpoints, inspect variables, and query runtime state via SQL.
 
 ## Quick Start
 
@@ -106,6 +117,21 @@ dbg src                       # source around current location
 dbg src app.ts 10 20          # specific line range
 ```
 
+### Diagnostics
+
+```sh
+dbg trace                     # show recent CDP send/recv history
+dbg trace 50                  # limit to 50 messages
+dbg health                    # probe Runtime.evaluate("1+1"), report latency
+dbg reconnect                 # reconnect to last known websocket URL
+```
+
+| Command | Description |
+|---|---|
+| `dbg trace [limit]` | Show recent CDP message history with direction and latency |
+| `dbg health` | Evaluate `1+1` on target, report latency in ms |
+| `dbg reconnect` | Reconnect to the last websocket URL from a previous session |
+
 ### Query Engine
 
 Everything the debugger can see is queryable with SQL:
@@ -123,6 +149,8 @@ WHERE supports: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `AND`, `OR`, parenthese
 
 #### Virtual Tables
 
+##### Debugger State
+
 | Table | Description | Key Columns |
 |---|---|---|
 | `frames` | Call stack | `id`, `function`, `file`, `line` |
@@ -138,6 +166,15 @@ WHERE supports: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `AND`, `OR`, parenthese
 | `exceptions` | Thrown exceptions | `text`, `file`, `line`, `uncaught` |
 | `async_frames` | Async stack traces | `function`, `file`, `line` |
 | `listeners` | Event listeners | `type`, `handler`, `once` |
+
+##### Event Log
+
+| Table | Description | Key Columns |
+|---|---|---|
+| `events` | Raw event log (daemon, CDP, connections) | `id`, `ts`, `source`, `category`, `method`, `data`, `session_id` |
+| `cdp` | CDP messages with latency metrics | `id`, `ts`, `direction`, `method`, `latency_ms`, `error`, `data` |
+| `cdp_messages` | Alias of `cdp` | Same as `cdp` |
+| `connections` | Connection lifecycle events | `id`, `ts`, `event`, `session_id`, `data` |
 
 Tables marked with required filters (`props`, `proto`, `source`, `listeners`) will tell you what they need.
 
@@ -159,6 +196,33 @@ dbg q "SELECT name, type, value FROM props WHERE object_id = '1234'"
 # Keep going
 dbg q "SELECT name, value FROM props WHERE object_id = '5678'"
 ```
+
+#### Event Log Queries
+
+```sh
+# Recent CDP traffic
+dbg q "SELECT direction, method, latency_ms FROM cdp ORDER BY id DESC LIMIT 20"
+
+# Slow CDP calls
+dbg q "SELECT method, latency_ms FROM cdp WHERE latency_ms > 100"
+
+# Connection history
+dbg q "SELECT ts, event, session_id FROM connections"
+
+# All events for current session
+dbg q "SELECT ts, source, method FROM events WHERE category = 'cdp' ORDER BY id DESC LIMIT 50"
+```
+
+## Event Store
+
+All debugger activity is recorded to a SQLite database for post-hoc analysis and diagnostics.
+
+- **Location**: `/tmp/dbg-events.db` (override with `DBG_EVENTS_DB` env var)
+- **Format**: SQLite with WAL mode, async batched writes (~100ms flush interval)
+- **Categories**: `daemon` (lifecycle), `connection` (connect/disconnect/reconnect), `cdp` (protocol messages)
+- **Session tracking**: Each connection gets a unique session ID for correlation
+
+The event store powers the `events`, `cdp`/`cdp_messages`, and `connections` virtual tables, as well as the `dbg trace` command. You can also query the database directly with any SQLite client.
 
 ## Output Format
 
@@ -186,6 +250,8 @@ caller        CLI              daemon            target
 ```
 
 The CLI is a thin client. It connects to a background daemon over a Unix socket (`/tmp/dbg.sock`), sends one command, receives one response, prints it, and exits. The daemon holds the persistent Chrome DevTools Protocol connection to the target.
+
+The daemon also maintains an **event store** (SQLite) that records every CDP message, connection event, and lifecycle action. This enables the `trace`, `health`, and event log query tables without adding state to the CLI.
 
 ## Compatibility
 
