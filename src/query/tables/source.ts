@@ -1,15 +1,18 @@
 // Source code lines table — lazy loaded via Debugger.getScriptSource
 // Requires WHERE file= or script_id=
 
-import type { VirtualTable } from "./index.js";
 import type { WhereExpr } from "../parser.js";
+import type { VirtualTable } from "./index.js";
 
 interface FilterMatch {
 	value: string | number;
 	op: string;
 }
 
-function extractFilter(where: WhereExpr | null, column: string): FilterMatch | null {
+function extractFilter(
+	where: WhereExpr | null,
+	column: string,
+): FilterMatch | null {
 	if (!where) return null;
 	switch (where.type) {
 		case "comparison":
@@ -17,7 +20,9 @@ function extractFilter(where: WhereExpr | null, column: string): FilterMatch | n
 				return { value: where.value, op: where.op };
 			return null;
 		case "and":
-			return extractFilter(where.left, column) ?? extractFilter(where.right, column);
+			return (
+				extractFilter(where.left, column) ?? extractFilter(where.right, column)
+			);
 		case "or":
 			return null;
 		case "paren":
@@ -44,7 +49,9 @@ export const sourceTable: VirtualTable = {
 		const fileFilter = extractFilter(where, "file");
 
 		if (!scriptIdFilter && !fileFilter) {
-			throw new Error("Table 'source' requires WHERE file=... or script_id=...");
+			throw new Error(
+				"Table 'source' requires WHERE file=... or script_id=...",
+			);
 		}
 
 		let scriptId: string | number | null = scriptIdFilter?.value ?? null;
@@ -74,9 +81,9 @@ export const sourceTable: VirtualTable = {
 		const script = state.scripts.get(String(scriptId));
 		const file = script?.file ?? "";
 
-		const result = await executor.send("Debugger.getScriptSource", {
+		const result = (await executor.send("Debugger.getScriptSource", {
 			scriptId: String(scriptId),
-		}) as { scriptSource: string };
+		})) as { scriptSource: string };
 
 		const lines = result.scriptSource.split("\n");
 		const rows: unknown[][] = lines.map((text, i) => [

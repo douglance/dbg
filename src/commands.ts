@@ -94,7 +94,10 @@ export async function handleHealth(
 		};
 
 		if (result.exceptionDetails) {
-			return { ok: false, error: `health check failed: ${result.exceptionDetails.text}` };
+			return {
+				ok: false,
+				error: `health check failed: ${result.exceptionDetails.text}`,
+			};
 		}
 		if (result.result.value !== 2) {
 			return {
@@ -168,7 +171,10 @@ export async function handleReconnect(
 			},
 			true,
 		);
-		return { ok: false, error: `reconnect failed: ${(error as Error).message}` };
+		return {
+			ok: false,
+			error: `reconnect failed: ${(error as Error).message}`,
+		};
 	}
 }
 
@@ -348,7 +354,10 @@ export async function handleSetBreakpoint(
 			line: bp.line,
 		};
 	} catch (e) {
-		return { ok: false, error: `setBreakpoint failed: ${(e as Error).message}` };
+		return {
+			ok: false,
+			error: `setBreakpoint failed: ${(e as Error).message}`,
+		};
 	}
 }
 
@@ -401,7 +410,12 @@ export async function handleEval(
 
 	try {
 		let result: {
-			result: { type: string; value?: unknown; description?: string; className?: string };
+			result: {
+				type: string;
+				value?: unknown;
+				description?: string;
+				className?: string;
+			};
 			exceptionDetails?: { text: string };
 		};
 
@@ -425,8 +439,7 @@ export async function handleEval(
 		const r = result.result;
 		let value: string;
 		if (r.value !== undefined) {
-			value =
-				typeof r.value === "string" ? r.value : JSON.stringify(r.value);
+			value = typeof r.value === "string" ? r.value : JSON.stringify(r.value);
 		} else {
 			value = r.description ?? `[${r.type}]`;
 		}

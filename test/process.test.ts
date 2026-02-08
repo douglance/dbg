@@ -29,7 +29,9 @@ function setupFreePort(port: number): void {
 	server.listen = vi.fn((_port: number, _host: string, cb: () => void) => cb());
 	server.address = vi.fn(() => ({ port }));
 	server.close = vi.fn((cb: () => void) => cb());
-	server.on = vi.fn((_event: string, _handler: (...args: unknown[]) => void) => server);
+	server.on = vi.fn(
+		(_event: string, _handler: (...args: unknown[]) => void) => server,
+	);
 	mockCreateServer.mockReturnValue(server);
 }
 

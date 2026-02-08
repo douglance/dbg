@@ -1,12 +1,10 @@
 // Thin CLI client: parses argv, connects to daemon socket, formats output
 
+import { fork } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
-import { fork } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import type { Command, Response } from "./protocol.js";
-import { SOCKET_PATH } from "./protocol.js";
+import { fileURLToPath } from "node:url";
 import {
 	formatBreakpointList,
 	formatBreakpointSet,
@@ -16,6 +14,8 @@ import {
 	formatStatus,
 	formatTsv,
 } from "./format.js";
+import type { Command, Response } from "./protocol.js";
+import { SOCKET_PATH } from "./protocol.js";
 
 // ─── Parse argv ───
 
@@ -27,14 +27,26 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 		return null;
 	}
 
-	const command = args[0];
+	// Extract @name prefix for session targeting: dbg @be c
+	let sessionName: string | undefined;
+	let cmdArgs = args;
+	if (args[0].startsWith("@")) {
+		sessionName = args[0].slice(1);
+		cmdArgs = args.slice(1);
+		if (cmdArgs.length === 0) {
+			error("missing command after @session");
+			return null;
+		}
+	}
+
+	const command = cmdArgs[0];
 
 	if (command === "--help" || command === "-h" || command === "help") {
 		printHelp();
 		return null;
 	}
 
-	const rest = args.slice(1).join(" ");
+	const rest = cmdArgs.slice(1).join(" ");
 	let jsonMode = false;
 
 	// Check for \j suffix on query args
@@ -44,87 +56,116 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 		queryArgs = queryArgs.slice(0, -2).trimEnd();
 	}
 
+	// Helper to attach session name
+	function withSession<T extends Command>(cmd: T): T {
+		if (sessionName) cmd.s = sessionName;
+		return cmd;
+	}
+
 	switch (command) {
-		case "open":
+		case "open": {
 			if (!rest) {
-				error("usage: dbg open <port|host:port>");
+				error("usage: dbg open <port|host:port> [session-name]");
 				return null;
 			}
-			return { cmd: { cmd: "open", args: rest }, jsonMode };
+			// Split: first token is port/host:port, second is optional session name
+			const openParts = cmdArgs.slice(1);
+			const portArg = openParts[0];
+			const openSessionName = openParts[1] || sessionName;
+			const cmd: Command = { cmd: "open", args: portArg };
+			if (openSessionName) cmd.s = openSessionName;
+			return { cmd, jsonMode };
+		}
 
 		case "close":
-			return { cmd: { cmd: "close" }, jsonMode };
+			return { cmd: withSession({ cmd: "close" }), jsonMode };
 
 		case "run":
 			if (!rest) {
 				error("usage: dbg run <command>");
 				return null;
 			}
-			return { cmd: { cmd: "run", args: rest }, jsonMode };
+			return { cmd: withSession({ cmd: "run", args: rest }), jsonMode };
 
 		case "restart":
-			return { cmd: { cmd: "restart" }, jsonMode };
+			return { cmd: withSession({ cmd: "restart" }), jsonMode };
 
 		case "status":
-			return { cmd: { cmd: "status" }, jsonMode };
+			return { cmd: withSession({ cmd: "status" }), jsonMode };
 
 		case "c":
-			return { cmd: { cmd: "c" }, jsonMode };
+			return { cmd: withSession({ cmd: "c" }), jsonMode };
 
 		case "s":
-			return { cmd: { cmd: "s" }, jsonMode };
+			return { cmd: withSession({ cmd: "s" }), jsonMode };
 
 		case "n":
-			return { cmd: { cmd: "n" }, jsonMode };
+			return { cmd: withSession({ cmd: "n" }), jsonMode };
 
 		case "o":
-			return { cmd: { cmd: "o" }, jsonMode };
+			return { cmd: withSession({ cmd: "o" }), jsonMode };
 
 		case "pause":
-			return { cmd: { cmd: "pause" }, jsonMode };
+			return { cmd: withSession({ cmd: "pause" }), jsonMode };
 
 		case "b":
 			if (!rest) {
 				error("usage: dbg b <file:line> [if <condition>]");
 				return null;
 			}
-			return { cmd: { cmd: "b", args: rest }, jsonMode };
+			return { cmd: withSession({ cmd: "b", args: rest }), jsonMode };
 
 		case "db":
 			if (!rest) {
 				error("usage: dbg db <breakpoint-id>");
 				return null;
 			}
-			return { cmd: { cmd: "db", args: rest }, jsonMode };
+			return { cmd: withSession({ cmd: "db", args: rest }), jsonMode };
 
 		case "bl":
-			return { cmd: { cmd: "bl" }, jsonMode };
+			return { cmd: withSession({ cmd: "bl" }), jsonMode };
 
 		case "e":
 			if (!rest) {
 				error("usage: dbg e <expression>");
 				return null;
 			}
-			return { cmd: { cmd: "e", args: rest }, jsonMode };
+			return { cmd: withSession({ cmd: "e", args: rest }), jsonMode };
 
 		case "src":
-			return { cmd: { cmd: "src", args: rest || undefined }, jsonMode };
+			return {
+				cmd: withSession({ cmd: "src", args: rest || undefined }),
+				jsonMode,
+			};
 
 		case "trace":
-			return { cmd: { cmd: "trace", args: queryArgs || undefined }, jsonMode };
+			return {
+				cmd: withSession({ cmd: "trace", args: queryArgs || undefined }),
+				jsonMode,
+			};
 
 		case "health":
-			return { cmd: { cmd: "health" }, jsonMode };
+			return { cmd: withSession({ cmd: "health" }), jsonMode };
 
 		case "reconnect":
-			return { cmd: { cmd: "reconnect" }, jsonMode };
+			return { cmd: withSession({ cmd: "reconnect" }), jsonMode };
 
 		case "q":
 			if (!queryArgs) {
 				error("usage: dbg q <query>");
 				return null;
 			}
-			return { cmd: { cmd: "q", args: queryArgs }, jsonMode };
+			return { cmd: withSession({ cmd: "q", args: queryArgs }), jsonMode };
+
+		case "ss":
+			return { cmd: { cmd: "ss" }, jsonMode };
+
+		case "use":
+			if (!rest) {
+				error("usage: dbg use <session-name>");
+				return null;
+			}
+			return { cmd: { cmd: "use", args: rest }, jsonMode };
 
 		default:
 			error(`unknown command: ${command}`);
@@ -134,15 +175,17 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 }
 
 function printUsage(): void {
-	const usage = `usage: dbg <command> [args]
+	const usage = `usage: dbg [<@session>] <command> [args]
        dbg --help
 
 commands:
-  open <port|host:port>    Connect to a Node.js debug port
-  close                    Disconnect and shut down daemon
+  open <port> [name]       Connect to debug port (optional session name)
+  close                    Disconnect session
   run <command>            Spawn process with --inspect-brk and connect
   restart                  Restart managed process
   status                   Show connection and pause status
+  ss                       List all sessions
+  use <name>               Switch current session
   c                        Continue execution
   s                        Step into
   n                        Step over
@@ -158,6 +201,8 @@ commands:
   reconnect                Reconnect to last websocket target
   q <query>                Run SQL query
 
+Session targeting: @name prefix targets a session (e.g., dbg @be c)
+
 Run 'dbg --help' for detailed usage and examples.`;
 	process.stderr.write(`${usage}\n`);
 }
@@ -166,22 +211,30 @@ function printHelp(): void {
 	const help = `dbg - Stateless CLI debugger for AI agents
 
 Every invocation is one command in, one response out, exit.
-A background daemon holds the CDP connection between calls.
+A background daemon holds CDP connections between calls.
 
 LIFECYCLE
-  dbg open <port|host:port>      Attach to a Node.js process already running
-                                 with --inspect or --inspect-brk.
-  dbg open 9229                  Local port.
-  dbg open 192.168.1.5:9229      Remote host.
-  dbg close                      Disconnect from target. If started via 'run',
-                                 also kills the target process.
-  dbg run "<command>"            Spawn a process with --inspect-brk on a free
-                                 port, start daemon, connect.
-  dbg run "node server.ts"       Example.
-  dbg restart                    Kill managed target, respawn same command,
-                                 reconnect, re-apply all breakpoints.
-  dbg status                     Show connection state, pause state, location,
-                                 and PID.
+  dbg open <port|host:port> [name]  Attach to a running debug target.
+  dbg open 9229                     Local port (auto-named session).
+  dbg open 9229 be                  Named session "be".
+  dbg open 192.168.1.5:9229 remote  Remote host, named "remote".
+  dbg close                         Disconnect session. If started via 'run',
+                                    also kills the target process.
+  dbg run "<command>"               Spawn with --inspect-brk, connect.
+  dbg run "node server.ts"          Example.
+  dbg restart                       Kill managed target, respawn same command,
+                                    reconnect, re-apply all breakpoints.
+  dbg status                        Show connection state, pause state, location.
+
+SESSIONS
+  dbg ss                            List all active sessions.
+  dbg use <name>                    Switch current session.
+  dbg @name <command>               Target a specific session.
+  dbg @be c                         Continue execution on "be" session.
+  dbg @fe status                    Check status of "fe" session.
+
+  Single session: no @name needed (backwards compatible).
+  Multiple sessions: use @name or 'use' to target.
 
 FLOW CONTROL
   dbg c                          Continue. Blocks until next pause or returns
@@ -341,9 +394,7 @@ function sendCommand(cmd: Command): Promise<Response> {
 
 		socket.on("error", (err) => {
 			reject(
-				new Error(
-					`cannot connect to daemon: ${err.message}. Is it running?`,
-				),
+				new Error(`cannot connect to daemon: ${err.message}. Is it running?`),
 			);
 		});
 
@@ -356,7 +407,11 @@ function sendCommand(cmd: Command): Promise<Response> {
 
 // ─── Output formatting ───
 
-function formatResponse(cmd: Command, response: Response, jsonMode: boolean): string {
+function formatResponse(
+	cmd: Command,
+	response: Response,
+	jsonMode: boolean,
+): string {
 	if (!response.ok) return "";
 
 	const r = response;
@@ -382,6 +437,7 @@ function formatResponse(cmd: Command, response: Response, jsonMode: boolean): st
 			r.line,
 			r.function,
 			r.pid,
+			r.s,
 		);
 	}
 

@@ -1,8 +1,8 @@
 // Query execution engine
 
 import type { CdpExecutor } from "../protocol.js";
+import { filterRows, limitRows, orderRows } from "./filter.js";
 import { parseQuery } from "./parser.js";
-import { filterRows, orderRows, limitRows } from "./filter.js";
 import { getTable } from "./tables/index.js";
 
 export async function executeQuery(
@@ -54,9 +54,7 @@ export async function executeQuery(
 		const indices = query.columns.map((col) => {
 			const idx = result.columns.indexOf(col);
 			if (idx === -1) {
-				throw new Error(
-					`Unknown column '${col}' in table '${query.table}'`,
-				);
+				throw new Error(`Unknown column '${col}' in table '${query.table}'`);
 			}
 			return idx;
 		});
@@ -67,7 +65,10 @@ export async function executeQuery(
 	return { columns: result.columns, rows, format };
 }
 
-function hasFilter(where: import("./parser.js").WhereExpr | null, column: string): boolean {
+function hasFilter(
+	where: import("./parser.js").WhereExpr | null,
+	column: string,
+): boolean {
 	if (!where) return false;
 	switch (where.type) {
 		case "comparison":

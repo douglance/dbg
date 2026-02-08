@@ -7,7 +7,9 @@ export const SOCKET_PATH = "/tmp/dbg.sock";
 
 // ─── CLI → Daemon request ───
 
-export type Command =
+// All commands carry an optional session name `s` for multi-session targeting.
+// Wire format: {"cmd":"c","s":"be"}
+export type Command = { s?: string } & (
 	| { cmd: "open"; args: string } // port or host:port
 	| { cmd: "close" }
 	| { cmd: "run"; args: string } // shell command to spawn
@@ -26,7 +28,10 @@ export type Command =
 	| { cmd: "trace"; args?: string }
 	| { cmd: "health" }
 	| { cmd: "reconnect" }
-	| { cmd: "q"; args: string }; // SQL query
+	| { cmd: "q"; args: string } // SQL query
+	| { cmd: "ss" } // list sessions
+	| { cmd: "use"; args: string } // switch current session
+);
 
 // ─── Daemon → CLI response ───
 
@@ -51,6 +56,9 @@ export interface OkResponse {
 	// Run/restart
 	messages?: string[];
 	latencyMs?: number;
+	// Session info
+	s?: string; // session name in response
+	sessions?: SessionInfo[];
 }
 
 export interface ErrResponse {
@@ -142,6 +150,29 @@ export interface AsyncFrameInfo {
 	line: number;
 	parentId: number | null;
 	description: string;
+}
+
+// ─── Multi-session types ───
+
+export interface Session {
+	name: string;
+	state: DaemonState;
+	cdp: import("./cdp/client.js").CdpClientWrapper;
+	managedChild: import("node:child_process").ChildProcess | null;
+	targetType: "node" | "page";
+	port: number;
+	host: string;
+}
+
+export interface SessionInfo {
+	name: string;
+	connected: boolean;
+	paused: boolean;
+	targetType: "node" | "page";
+	port: number;
+	host: string;
+	pid: number | null;
+	current: boolean;
 }
 
 // ─── CDP executor interface for query tables ───

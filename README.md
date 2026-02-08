@@ -30,7 +30,7 @@ Traditional debuggers are interactive. They assume a human is sitting at a termi
 ## Install
 
 ```sh
-npm install -g dbg
+npm install -g @douglance/dbg
 ```
 
 ### As a Claude Code Skill

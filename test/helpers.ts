@@ -26,10 +26,12 @@ export function createExecutor(
 	send: ReturnType<typeof vi.fn>;
 	getState: ReturnType<typeof vi.fn>;
 } {
-	const send = vi.fn(async (method: string, params?: Record<string, unknown>) => {
-		if (!sendImpl) return {};
-		return sendImpl(method, params);
-	});
+	const send = vi.fn(
+		async (method: string, params?: Record<string, unknown>) => {
+			if (!sendImpl) return {};
+			return sendImpl(method, params);
+		},
+	);
 	const getState = vi.fn(() => state);
 	return {
 		executor: { send, getState },

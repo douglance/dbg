@@ -1,4 +1,4 @@
-// CDP target discovery: find the WebSocket debugger URL for a Node.js target
+// CDP target discovery: find the WebSocket debugger URL for a debuggable target
 
 import http from "node:http";
 
@@ -10,10 +10,18 @@ interface TargetInfo {
 	webSocketDebuggerUrl: string;
 }
 
+export type TargetType = "node" | "page";
+
+export interface DiscoveredTarget {
+	wsUrl: string;
+	type: TargetType;
+}
+
 export function discoverTarget(
 	port: number,
 	host = "127.0.0.1",
-): Promise<string> {
+	targetType?: TargetType,
+): Promise<DiscoveredTarget> {
 	return new Promise((resolve, reject) => {
 		const req = http.get(`http://${host}:${port}/json`, (res) => {
 			let body = "";
@@ -23,23 +31,55 @@ export function discoverTarget(
 			res.on("end", () => {
 				try {
 					const targets = JSON.parse(body) as TargetInfo[];
-					const target = targets.find(
-						(t) => t.type === "node" && t.webSocketDebuggerUrl,
-					);
-					if (!target) {
-						reject(new Error(`no debuggable Node.js target on ${host}:${port}`));
+
+					if (targetType) {
+						// Explicit type requested
+						const target = targets.find(
+							(t) => t.type === targetType && t.webSocketDebuggerUrl,
+						);
+						if (!target) {
+							reject(
+								new Error(
+									`no debuggable ${targetType} target on ${host}:${port}`,
+								),
+							);
+							return;
+						}
+						resolve({ wsUrl: target.webSocketDebuggerUrl, type: targetType });
 						return;
 					}
-					resolve(target.webSocketDebuggerUrl);
+
+					// Auto-detect: try node first, fall back to page
+					const nodeTarget = targets.find(
+						(t) => t.type === "node" && t.webSocketDebuggerUrl,
+					);
+					if (nodeTarget) {
+						resolve({ wsUrl: nodeTarget.webSocketDebuggerUrl, type: "node" });
+						return;
+					}
+
+					const pageTarget = targets.find(
+						(t) => t.type === "page" && t.webSocketDebuggerUrl,
+					);
+					if (pageTarget) {
+						resolve({ wsUrl: pageTarget.webSocketDebuggerUrl, type: "page" });
+						return;
+					}
+
+					reject(new Error(`no debuggable target on ${host}:${port}`));
 				} catch (e) {
 					reject(
-						new Error(`failed to parse /json response: ${(e as Error).message}`),
+						new Error(
+							`failed to parse /json response: ${(e as Error).message}`,
+						),
 					);
 				}
 			});
 		});
 		req.on("error", (e) => {
-			reject(new Error(`cannot reach debugger at ${host}:${port}: ${e.message}`));
+			reject(
+				new Error(`cannot reach debugger at ${host}:${port}: ${e.message}`),
+			);
 		});
 		req.setTimeout(5000, () => {
 			req.destroy();

@@ -46,7 +46,10 @@ describe("source table", () => {
 				expect(method).toBe("Debugger.getScriptSource");
 				requestedScriptId = (params as { scriptId: string }).scriptId;
 				return {
-					scriptSource: requestedScriptId === "2" ? "const ok = true;" : "const wrong = true;",
+					scriptSource:
+						requestedScriptId === "2"
+							? "const ok = true;"
+							: "const wrong = true;",
 				};
 			},
 		};

@@ -1,17 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-	formatTsv,
-	formatJson,
-	formatFlowStatus,
-	formatBreakpointSet,
 	formatBreakpointList,
+	formatBreakpointSet,
+	formatFlowStatus,
+	formatJson,
 	formatSource,
 	formatStatus,
+	formatTsv,
 } from "../src/format.js";
 
 describe("formatTsv", () => {
 	it("produces header and rows", () => {
-		const result = formatTsv(["name", "value"], [["x", 10], ["y", 20]]);
+		const result = formatTsv(
+			["name", "value"],
+			[
+				["x", 10],
+				["y", 20],
+			],
+		);
 		expect(result).toBe("name\tvalue\nx\t10\ny\t20");
 	});
 
@@ -44,7 +50,13 @@ describe("formatTsv", () => {
 
 describe("formatJson", () => {
 	it("converts columns and rows to array of objects", () => {
-		const result = formatJson(["name", "value"], [["x", 10], ["y", 20]]);
+		const result = formatJson(
+			["name", "value"],
+			[
+				["x", 10],
+				["y", 20],
+			],
+		);
 		expect(JSON.parse(result)).toEqual([
 			{ name: "x", value: 10 },
 			{ name: "y", value: 20 },
@@ -167,12 +179,26 @@ describe("formatStatus", () => {
 	});
 
 	it("includes pid when provided", () => {
-		const result = formatStatus(true, false, undefined, undefined, undefined, 12345);
+		const result = formatStatus(
+			true,
+			false,
+			undefined,
+			undefined,
+			undefined,
+			12345,
+		);
 		expect(result).toBe("connected\trunning\tpid=12345");
 	});
 
 	it("shows disconnected with pid", () => {
-		const result = formatStatus(false, false, undefined, undefined, undefined, 9999);
+		const result = formatStatus(
+			false,
+			false,
+			undefined,
+			undefined,
+			undefined,
+			9999,
+		);
 		expect(result).toBe("disconnected\tpid=9999");
 	});
 

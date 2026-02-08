@@ -1,17 +1,23 @@
 // Object properties table — drills into an object via Runtime.getProperties
 // Requires WHERE object_id=...
 
-import type { VirtualTable } from "./index.js";
 import type { WhereExpr } from "../parser.js";
+import type { VirtualTable } from "./index.js";
 
-function extractFilterValue(where: WhereExpr | null, column: string): string | number | null {
+function extractFilterValue(
+	where: WhereExpr | null,
+	column: string,
+): string | number | null {
 	if (!where) return null;
 	switch (where.type) {
 		case "comparison":
 			if (where.column === column && where.op === "=") return where.value;
 			return null;
 		case "and":
-			return extractFilterValue(where.left, column) ?? extractFilterValue(where.right, column);
+			return (
+				extractFilterValue(where.left, column) ??
+				extractFilterValue(where.right, column)
+			);
 		case "or":
 			return null;
 		case "paren":
@@ -21,7 +27,16 @@ function extractFilterValue(where: WhereExpr | null, column: string): string | n
 
 export const propsTable: VirtualTable = {
 	name: "props",
-	columns: ["object_id", "name", "type", "value", "writable", "configurable", "enumerable", "child_id"],
+	columns: [
+		"object_id",
+		"name",
+		"type",
+		"value",
+		"writable",
+		"configurable",
+		"enumerable",
+		"child_id",
+	],
 	requiredFilters: ["object_id"],
 	async fetch(where, executor) {
 		const objectId = extractFilterValue(where, "object_id");
@@ -29,10 +44,10 @@ export const propsTable: VirtualTable = {
 			return { columns: this.columns, rows: [] };
 		}
 
-		const result = await executor.send("Runtime.getProperties", {
+		const result = (await executor.send("Runtime.getProperties", {
 			objectId: String(objectId),
 			ownProperties: true,
-		}) as {
+		})) as {
 			result: Array<{
 				name: string;
 				writable?: boolean;

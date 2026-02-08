@@ -37,7 +37,9 @@ describe("query tables", () => {
 		const frameRows = await framesTable.fetch(null, executor);
 		const scopeRows = await scopesTable.fetch(null, executor);
 
-		expect(frameRows.rows).toEqual([[0, "(anonymous)", "a.ts", 2, 1, "file:///a.ts", "s1"]]);
+		expect(frameRows.rows).toEqual([
+			[0, "(anonymous)", "a.ts", 2, 1, "file:///a.ts", "s1"],
+		]);
 		expect(scopeRows.rows).toEqual([[0, 0, "local", "Local", "obj-1"]]);
 	});
 
@@ -151,7 +153,14 @@ describe("query tables", () => {
 			],
 		});
 		const { executor } = createExecutor(state, () => ({
-			result: [{ name: "a" }, { name: "b" }, { name: "c" }, { name: "d" }, { name: "e" }, { name: "f" }],
+			result: [
+				{ name: "a" },
+				{ name: "b" },
+				{ name: "c" },
+				{ name: "d" },
+				{ name: "e" },
+				{ name: "f" },
+			],
 		}));
 
 		const result = await thisTable.fetch(null, executor);
@@ -170,7 +179,12 @@ describe("query tables", () => {
 					writable: true,
 					configurable: true,
 					enumerable: false,
-					value: { type: "object", className: "Box", description: "Box", objectId: "o-1" },
+					value: {
+						type: "object",
+						className: "Box",
+						description: "Box",
+						objectId: "o-1",
+					},
 				},
 				{
 					name: "fn",
@@ -200,7 +214,16 @@ describe("query tables", () => {
 		);
 		expect(rows.rows).toEqual([
 			["root-1", "obj", "object", "Box", true, true, false, "o-1"],
-			["root-1", "fn", "function", "[Function: fn]", false, false, false, "f-1"],
+			[
+				"root-1",
+				"fn",
+				"function",
+				"[Function: fn]",
+				false,
+				false,
+				false,
+				"f-1",
+			],
 			["root-1", "num", "number", "3", false, false, false, ""],
 			["root-1", "missing", "undefined", "undefined", false, false, false, ""],
 		]);

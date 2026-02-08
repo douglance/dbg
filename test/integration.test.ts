@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import * as net from "node:net";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const CLI = path.resolve(__dirname, "../dist/cli.js");
 const SOCKET_PATH = "/tmp/dbg.sock";
@@ -11,7 +11,11 @@ const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-events.db");
 
 // ─── Helpers ───
 
-function dbg(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+function dbg(...args: string[]): {
+	stdout: string;
+	stderr: string;
+	exitCode: number;
+} {
 	try {
 		const stdout = execFileSync(process.execPath, [CLI, ...args], {
 			encoding: "utf8",
@@ -122,6 +126,7 @@ function killProcessOnPort(port: number): void {
 describe("integration", () => {
 	let targetProcess: ChildProcess | null = null;
 	let inspectPort: number;
+	let targetProcess2: ChildProcess | null = null;
 
 	beforeAll(() => {
 		// Ensure no stale daemon
@@ -136,10 +141,14 @@ describe("integration", () => {
 			// ignore
 		}
 
-		// Kill target if we spawned one
+		// Kill targets if we spawned them
 		if (targetProcess && !targetProcess.killed) {
 			targetProcess.kill("SIGKILL");
 			targetProcess = null;
+		}
+		if (targetProcess2 && !targetProcess2.killed) {
+			targetProcess2.kill("SIGKILL");
+			targetProcess2 = null;
 		}
 
 		// Kill daemon between tests
@@ -165,14 +174,21 @@ describe("integration", () => {
 	/** Spawn a target with --inspect-brk and wait for the debugger to be ready. */
 	async function spawnTarget(): Promise<number> {
 		inspectPort = await findFreePort();
-		targetProcess = spawn(process.execPath, [`--inspect-brk=${inspectPort}`, TARGET], {
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+		targetProcess = spawn(
+			process.execPath,
+			[`--inspect-brk=${inspectPort}`, TARGET],
+			{
+				stdio: ["pipe", "pipe", "pipe"],
+			},
+		);
 
 		// Wait for "Debugger listening" on stderr
 		return new Promise((resolve, reject) => {
 			let stderr = "";
-			const timeout = setTimeout(() => reject(new Error("target did not start")), 10000);
+			const timeout = setTimeout(
+				() => reject(new Error("target did not start")),
+				10000,
+			);
 			const child = targetProcess;
 
 			if (!child?.stderr) {
@@ -183,7 +199,9 @@ describe("integration", () => {
 
 			child.stderr.on("data", (chunk: Buffer) => {
 				stderr += chunk.toString();
-				const match = stderr.match(/Debugger listening on ws:\/\/[\w.]+:(\d+)\//);
+				const match = stderr.match(
+					/Debugger listening on ws:\/\/[\w.]+:(\d+)\//,
+				);
 				if (match) {
 					clearTimeout(timeout);
 					resolve(Number.parseInt(match[1], 10));
@@ -191,6 +209,47 @@ describe("integration", () => {
 			});
 
 			child.on("error", (err) => {
+				clearTimeout(timeout);
+				reject(err);
+			});
+		});
+	}
+
+	/** Spawn an independent target, returning its process and port (no side effects). */
+	async function spawnNewTarget(): Promise<{
+		proc: ChildProcess;
+		port: number;
+	}> {
+		const port = await findFreePort();
+		const proc = spawn(process.execPath, [`--inspect-brk=${port}`, TARGET], {
+			stdio: ["pipe", "pipe", "pipe"],
+		});
+
+		return new Promise((resolve, reject) => {
+			let stderr = "";
+			const timeout = setTimeout(
+				() => reject(new Error("target did not start")),
+				10000,
+			);
+
+			if (!proc?.stderr) {
+				clearTimeout(timeout);
+				reject(new Error("target process stderr is unavailable"));
+				return;
+			}
+
+			proc.stderr.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString();
+				const match = stderr.match(
+					/Debugger listening on ws:\/\/[\w.]+:(\d+)\//,
+				);
+				if (match) {
+					clearTimeout(timeout);
+					resolve({ proc, port: Number.parseInt(match[1], 10) });
+				}
+			});
+
+			proc.on("error", (err) => {
 				clearTimeout(timeout);
 				reject(err);
 			});
@@ -339,7 +398,9 @@ describe("integration", () => {
 
 		const trace = dbg("trace", "20");
 		expect(trace.exitCode).toBe(0);
-		expect(trace.stdout).toContain("id\tts\tdirection\tmethod\tlatency_ms\terror\tdata");
+		expect(trace.stdout).toContain(
+			"id\tts\tdirection\tmethod\tlatency_ms\terror\tdata",
+		);
 		expect(trace.stdout).toContain("Debugger.stepOver");
 	});
 
@@ -363,12 +424,163 @@ describe("integration", () => {
 		dbg("open", String(port));
 		dbg("n");
 
-		const events = dbg("q", "SELECT source, category, method FROM events LIMIT 5");
+		const events = dbg(
+			"q",
+			"SELECT source, category, method FROM events LIMIT 5",
+		);
 		expect(events.exitCode).toBe(0);
 		expect(events.stdout).toContain("source\tcategory\tmethod");
 
 		const cdp = dbg("q", "SELECT method, direction FROM cdp LIMIT 5");
 		expect(cdp.exitCode).toBe(0);
 		expect(cdp.stdout).toContain("method\tdirection");
+	});
+
+	// ─── Multi-session tests ───
+
+	describe("multi-session", () => {
+		it("opens two sessions with names and lists them", async () => {
+			const t1 = await spawnNewTarget();
+			const t2 = await spawnNewTarget();
+			targetProcess = t1.proc;
+			targetProcess2 = t2.proc;
+
+			const open1 = dbg("open", String(t1.port), "a");
+			expect(open1.exitCode).toBe(0);
+			expect(open1.stdout).toContain("connected");
+
+			const open2 = dbg("open", String(t2.port), "b");
+			expect(open2.exitCode).toBe(0);
+			expect(open2.stdout).toContain("connected");
+
+			const ss = dbg("ss");
+			expect(ss.exitCode).toBe(0);
+			// Session names appear as first column in TSV rows
+			expect(ss.stdout).toMatch(/^a\t/m);
+			expect(ss.stdout).toMatch(/^b\t/m);
+
+			dbg("@a", "close");
+			dbg("@b", "close");
+		});
+
+		it("'use' switches current session", async () => {
+			const t1 = await spawnNewTarget();
+			const t2 = await spawnNewTarget();
+			targetProcess = t1.proc;
+			targetProcess2 = t2.proc;
+
+			dbg("open", String(t1.port), "a");
+			dbg("open", String(t2.port), "b");
+
+			const useA = dbg("use", "a");
+			expect(useA.exitCode).toBe(0);
+
+			const statusA = dbg("status");
+			expect(statusA.exitCode).toBe(0);
+			expect(statusA.stdout).toContain("connected");
+
+			const useB = dbg("use", "b");
+			expect(useB.exitCode).toBe(0);
+
+			const statusB = dbg("status");
+			expect(statusB.exitCode).toBe(0);
+			expect(statusB.stdout).toContain("connected");
+
+			dbg("@a", "close");
+			dbg("@b", "close");
+		});
+
+		it("@name prefix targets specific session", async () => {
+			const t1 = await spawnNewTarget();
+			const t2 = await spawnNewTarget();
+			targetProcess = t1.proc;
+			targetProcess2 = t2.proc;
+
+			dbg("open", String(t1.port), "a");
+			dbg("open", String(t2.port), "b");
+
+			const statusA = dbg("@a", "status");
+			expect(statusA.exitCode).toBe(0);
+			expect(statusA.stdout).toContain("connected");
+
+			const statusB = dbg("@b", "status");
+			expect(statusB.exitCode).toBe(0);
+			expect(statusB.stdout).toContain("connected");
+
+			const stepA = dbg("@a", "n");
+			expect(stepA.exitCode).toBe(0);
+			expect(stepA.stdout).toContain("paused");
+
+			const stepB = dbg("@b", "n");
+			expect(stepB.exitCode).toBe(0);
+			expect(stepB.stdout).toContain("paused");
+
+			dbg("@a", "close");
+			dbg("@b", "close");
+		});
+
+		it("close one session leaves other intact", async () => {
+			const t1 = await spawnNewTarget();
+			const t2 = await spawnNewTarget();
+			targetProcess = t1.proc;
+			targetProcess2 = t2.proc;
+
+			dbg("open", String(t1.port), "a");
+			dbg("open", String(t2.port), "b");
+
+			dbg("@a", "close");
+
+			const ss = dbg("ss");
+			expect(ss.exitCode).toBe(0);
+			expect(ss.stdout).toMatch(/^b\t/m);
+			expect(ss.stdout).not.toMatch(/^a\t/m);
+
+			// Single remaining session auto-resolves without @name
+			const status = dbg("status");
+			expect(status.exitCode).toBe(0);
+			expect(status.stdout).toContain("connected");
+
+			dbg("@b", "close");
+		});
+
+		it("single session works without @name (backwards compat)", async () => {
+			const port = await spawnTarget();
+
+			const openResult = dbg("open", String(port), "mysession");
+			expect(openResult.exitCode).toBe(0);
+
+			// No @name needed — single session auto-resolves
+			const status = dbg("status");
+			expect(status.exitCode).toBe(0);
+			expect(status.stdout).toContain("connected");
+
+			const step = dbg("n");
+			expect(step.exitCode).toBe(0);
+			expect(step.stdout).toContain("paused");
+
+			dbg("close");
+		});
+
+		it("query shows events from multiple sessions", async () => {
+			const t1 = await spawnNewTarget();
+			const t2 = await spawnNewTarget();
+			targetProcess = t1.proc;
+			targetProcess2 = t2.proc;
+
+			dbg("open", String(t1.port), "a");
+			dbg("open", String(t2.port), "b");
+
+			dbg("@a", "n");
+			dbg("@b", "n");
+
+			const q = dbg("q", "SELECT method FROM cdp LIMIT 10");
+			expect(q.exitCode).toBe(0);
+			expect(q.stdout).toContain("method");
+			// Should have header + at least one data row
+			expect(q.stdout.trim().split("\n").length).toBeGreaterThan(1);
+
+			dbg("@a", "close");
+			dbg("@b", "close");
+		});
 	});
 });

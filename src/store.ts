@@ -1,5 +1,8 @@
 import { createRequire } from "node:module";
-import type { DatabaseSync as DatabaseSyncType, StatementSync } from "node:sqlite";
+import type {
+	DatabaseSync as DatabaseSyncType,
+	StatementSync,
+} from "node:sqlite";
 
 const require = createRequire(import.meta.url);
 const SQLITE_MODULE = "node:sqlite";
@@ -49,9 +52,15 @@ export class EventStore {
 			)
 		`);
 		this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)");
-		this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)");
-		this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_method ON events(method)");
-		this.db.exec("CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id)");
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_events_source ON events(source)",
+		);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_events_method ON events(method)",
+		);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id)",
+		);
 
 		this.insertStmt = this.db.prepare(
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",

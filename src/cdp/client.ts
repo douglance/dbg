@@ -23,14 +23,31 @@ interface CdpClient extends EventEmitter {
 		setBreakpoint(params: {
 			location: { scriptId: string; lineNumber: number; columnNumber?: number };
 			condition?: string;
-		}): Promise<{ breakpointId: string; actualLocation: { scriptId: string; lineNumber: number; columnNumber: number } }>;
+		}): Promise<{
+			breakpointId: string;
+			actualLocation: {
+				scriptId: string;
+				lineNumber: number;
+				columnNumber: number;
+			};
+		}>;
 		removeBreakpoint(params: { breakpointId: string }): Promise<void>;
-		getScriptSource(params: { scriptId: string }): Promise<{ scriptSource: string }>;
+		getScriptSource(params: { scriptId: string }): Promise<{
+			scriptSource: string;
+		}>;
 		evaluateOnCallFrame(params: {
 			callFrameId: string;
 			expression: string;
 			returnByValue?: boolean;
-		}): Promise<{ result: { type: string; value?: unknown; description?: string; className?: string }; exceptionDetails?: { text: string } }>;
+		}): Promise<{
+			result: {
+				type: string;
+				value?: unknown;
+				description?: string;
+				className?: string;
+			};
+			exceptionDetails?: { text: string };
+		}>;
 	};
 	Runtime: {
 		enable(): Promise<void>;
@@ -38,7 +55,15 @@ interface CdpClient extends EventEmitter {
 		evaluate(params: {
 			expression: string;
 			returnByValue?: boolean;
-		}): Promise<{ result: { type: string; value?: unknown; description?: string; className?: string }; exceptionDetails?: { text: string } }>;
+		}): Promise<{
+			result: {
+				type: string;
+				value?: unknown;
+				description?: string;
+				className?: string;
+			};
+			exceptionDetails?: { text: string };
+		}>;
 	};
 	close(): Promise<void>;
 	send(method: string, params?: Record<string, unknown>): Promise<unknown>;
@@ -69,7 +94,10 @@ export class CdpClientWrapper implements CdpExecutor {
 		try {
 			const CDP = (await import("chrome-remote-interface")).default;
 			// Use local: true to skip protocol fetching from target
-			this.client = (await CDP({ target: wsUrl, local: true })) as unknown as CdpClient;
+			this.client = (await CDP({
+				target: wsUrl,
+				local: true,
+			})) as unknown as CdpClient;
 
 			this.setupEventHandlers();
 
@@ -137,7 +165,11 @@ export class CdpClientWrapper implements CdpExecutor {
 				callFrames: Array<{
 					callFrameId: string;
 					functionName: string;
-					location: { scriptId: string; lineNumber: number; columnNumber: number };
+					location: {
+						scriptId: string;
+						lineNumber: number;
+						columnNumber: number;
+					};
 					url: string;
 					scopeChain: Array<{
 						type: string;
@@ -295,9 +327,7 @@ export class CdpClientWrapper implements CdpExecutor {
 			this.state.asyncStackTrace.push(info);
 		}
 		if (trace.parent) {
-			this.parseAsyncStackTrace(
-				trace.parent as typeof trace,
-			);
+			this.parseAsyncStackTrace(trace.parent as typeof trace);
 		}
 	}
 

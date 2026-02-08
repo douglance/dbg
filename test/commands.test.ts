@@ -166,11 +166,15 @@ describe("commands", () => {
 
 	it("rejects invalid breakpoint arguments", async () => {
 		state.connected = true;
-		await expect(handleSetBreakpoint(cdpClient, state, "main.ts")).resolves.toEqual({
+		await expect(
+			handleSetBreakpoint(cdpClient, state, "main.ts"),
+		).resolves.toEqual({
 			ok: false,
 			error: "expected file:line",
 		});
-		await expect(handleSetBreakpoint(cdpClient, state, "main.ts:abc")).resolves.toEqual({
+		await expect(
+			handleSetBreakpoint(cdpClient, state, "main.ts:abc"),
+		).resolves.toEqual({
 			ok: false,
 			error: "invalid line number",
 		});
@@ -298,11 +302,15 @@ describe("commands", () => {
 
 		const paused = await handleEval(cdpClient, state, "obj");
 		expect(paused).toEqual({ ok: true, value: '{"ok":true}', type: "object" });
-		expect(cdp.send).toHaveBeenNthCalledWith(1, "Debugger.evaluateOnCallFrame", {
-			callFrameId: "cf-1",
-			expression: "obj",
-			returnByValue: true,
-		});
+		expect(cdp.send).toHaveBeenNthCalledWith(
+			1,
+			"Debugger.evaluateOnCallFrame",
+			{
+				callFrameId: "cf-1",
+				expression: "obj",
+				returnByValue: true,
+			},
+		);
 
 		state.paused = false;
 		state.callFrames = [];
@@ -378,7 +386,9 @@ describe("commands", () => {
 			ok: false,
 			error: "expected: file startLine endLine",
 		});
-		await expect(handleSource(cdpClient, state, "missing.ts 1 2")).resolves.toEqual({
+		await expect(
+			handleSource(cdpClient, state, "missing.ts 1 2"),
+		).resolves.toEqual({
 			ok: false,
 			error: 'no script matching "missing.ts"',
 		});

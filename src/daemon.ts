@@ -1,5 +1,6 @@
 // Background daemon: Unix socket server that receives JSON commands from CLI
 // and dispatches to CDP command handlers
+// Supports multiple concurrent CDP sessions via a session registry
 
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -22,7 +23,14 @@ import {
 	handleTrace,
 } from "./commands.js";
 import { killTarget, spawnTarget } from "./process.js";
-import type { Command, DaemonState, Response, StoredBreakpoint } from "./protocol.js";
+import type {
+	Command,
+	DaemonState,
+	Response,
+	Session,
+	SessionInfo,
+	StoredBreakpoint,
+} from "./protocol.js";
 import { SOCKET_PATH } from "./protocol.js";
 import { EventStore } from "./store.js";
 
@@ -46,10 +54,21 @@ function createState(): DaemonState {
 	};
 }
 
-let state = createState();
 const store = new EventStore();
-let cdp = new CdpClientWrapper(state, store);
-let managedChild: ChildProcess | null = null;
+const registry = {
+	sessions: new Map<string, Session>(),
+	current: null as string | null,
+};
+
+let sessionCounter = 0;
+
+function nextSessionName(): string {
+	while (registry.sessions.has(`s${sessionCounter}`)) {
+		sessionCounter++;
+	}
+	return `s${sessionCounter++}`;
+}
+
 store.record(
 	{
 		source: "daemon",
@@ -60,11 +79,33 @@ store.record(
 	true,
 );
 
+// ─── Session resolution ───
+
+function resolveSession(name?: string): Session | null {
+	// Explicit name -> look up in map
+	if (name) return registry.sessions.get(name) ?? null;
+	// Only one session -> return it
+	if (registry.sessions.size === 1)
+		return registry.sessions.values().next().value ?? null;
+	// Current set -> return that
+	if (registry.current) return registry.sessions.get(registry.current) ?? null;
+	// Otherwise null
+	return null;
+}
+
 // ─── Lifecycle commands ───
 
-async function handleOpen(args: string): Promise<Response> {
-	if (state.connected) {
-		return { ok: false, error: "already connected; close first" };
+async function handleOpen(
+	args: string,
+	sessionName?: string,
+): Promise<Response> {
+	const name = sessionName ?? nextSessionName();
+
+	if (registry.sessions.has(name)) {
+		return {
+			ok: false,
+			error: "session already exists; close it first",
+		};
 	}
 
 	let host = "127.0.0.1";
@@ -82,14 +123,32 @@ async function handleOpen(args: string): Promise<Response> {
 		return { ok: false, error: "invalid port" };
 	}
 
+	const state = createState();
+	const cdp = new CdpClientWrapper(state, store);
+
 	try {
-		const wsUrl = await discoverTarget(port, host);
-		await cdp.connect(wsUrl);
-		state.lastWsUrl = wsUrl;
+		const discovered = await discoverTarget(port, host);
+		await cdp.connect(discovered.wsUrl);
+		state.lastWsUrl = discovered.wsUrl;
+
+		const session: Session = {
+			name,
+			state,
+			cdp,
+			managedChild: null,
+			targetType: discovered.type,
+			port,
+			host,
+		};
+
+		registry.sessions.set(name, session);
+		registry.current = name;
+
 		return {
 			ok: true,
 			connected: true,
 			status: state.paused ? "paused" : "running",
+			s: name,
 			messages: [`connected to ${host}:${port}`],
 		};
 	} catch (e) {
@@ -97,50 +156,85 @@ async function handleOpen(args: string): Promise<Response> {
 	}
 }
 
-async function handleClose(): Promise<Response> {
-	await cdp.disconnect();
-	if (managedChild) {
-		killTarget(managedChild);
-		managedChild = null;
+async function handleClose(session: Session): Promise<Response> {
+	await session.cdp.disconnect();
+	if (session.managedChild) {
+		killTarget(session.managedChild);
+		session.managedChild = null;
 	}
 
-	const prevPid = state.pid;
-	state = createState();
-	cdp = new CdpClientWrapper(state, store);
+	const prevPid = session.state.pid;
+	const sessionName = session.name;
+	registry.sessions.delete(sessionName);
+
+	// Update current pointer
+	if (registry.current === sessionName) {
+		const firstRemaining = registry.sessions.keys().next().value;
+		registry.current = firstRemaining ?? null;
+	}
 
 	return {
 		ok: true,
-		messages: [prevPid ? `closed (pid ${prevPid})` : "closed"],
+		messages: [
+			prevPid
+				? `closed ${sessionName} (pid ${prevPid})`
+				: `closed ${sessionName}`,
+		],
 	};
 }
 
-async function handleRun(command: string): Promise<Response> {
-	if (state.connected) {
-		return { ok: false, error: "already connected; close first" };
+async function handleRun(
+	command: string,
+	sessionName?: string,
+): Promise<Response> {
+	const name = sessionName ?? nextSessionName();
+
+	if (registry.sessions.has(name)) {
+		return {
+			ok: false,
+			error: "session already exists; close it first",
+		};
 	}
+
+	const state = createState();
+	const cdp = new CdpClientWrapper(state, store);
 
 	try {
 		const { child, port } = await spawnTarget(command);
-		managedChild = child;
 		state.pid = child.pid ?? null;
 		state.managedCommand = command;
 
+		const session: Session = {
+			name,
+			state,
+			cdp,
+			managedChild: child,
+			targetType: "node",
+			port,
+			host: "127.0.0.1",
+		};
+
 		// Listen for process exit
 		child.on("exit", () => {
-			managedChild = null;
+			session.managedChild = null;
 			state.pid = null;
 			cdp.disconnect();
 		});
 
-		const wsUrl = await discoverTarget(port);
-		await cdp.connect(wsUrl);
-		state.lastWsUrl = wsUrl;
+		const discovered = await discoverTarget(port);
+		await cdp.connect(discovered.wsUrl);
+		state.lastWsUrl = discovered.wsUrl;
+		session.targetType = discovered.type;
+
+		registry.sessions.set(name, session);
+		registry.current = name;
 
 		return {
 			ok: true,
 			connected: true,
 			status: state.paused ? "paused" : "running",
 			pid: state.pid ?? undefined,
+			s: name,
 			messages: [`spawned pid=${state.pid}, connected on port ${port}`],
 		};
 	} catch (e) {
@@ -148,41 +242,43 @@ async function handleRun(command: string): Promise<Response> {
 	}
 }
 
-async function handleRestart(): Promise<Response> {
-	if (!state.managedCommand) {
+async function handleRestart(session: Session): Promise<Response> {
+	if (!session.state.managedCommand) {
 		return { ok: false, error: "no managed process to restart" };
 	}
 
-	const command = state.managedCommand;
-	const savedBreakpoints = Array.from(state.breakpoints.values());
+	const command = session.state.managedCommand;
+	const savedBreakpoints = Array.from(session.state.breakpoints.values());
 
 	// Disconnect and kill
-	await cdp.disconnect();
-	if (managedChild) {
-		killTarget(managedChild);
-		managedChild = null;
+	await session.cdp.disconnect();
+	if (session.managedChild) {
+		killTarget(session.managedChild);
+		session.managedChild = null;
 	}
 
 	// Reset state but remember the command
-	state = createState();
-	state.managedCommand = command;
-	cdp = new CdpClientWrapper(state, store);
+	session.state = createState();
+	session.state.managedCommand = command;
+	session.cdp = new CdpClientWrapper(session.state, store);
 
 	// Respawn
 	try {
 		const { child, port } = await spawnTarget(command);
-		managedChild = child;
-		state.pid = child.pid ?? null;
+		session.managedChild = child;
+		session.state.pid = child.pid ?? null;
+		session.port = port;
 
 		child.on("exit", () => {
-			managedChild = null;
-			state.pid = null;
-			cdp.disconnect();
+			session.managedChild = null;
+			session.state.pid = null;
+			session.cdp.disconnect();
 		});
 
-		const wsUrl = await discoverTarget(port);
-		await cdp.connect(wsUrl);
-		state.lastWsUrl = wsUrl;
+		const discovered = await discoverTarget(port);
+		await session.cdp.connect(discovered.wsUrl);
+		session.state.lastWsUrl = discovered.wsUrl;
+		session.targetType = discovered.type;
 
 		// Re-apply breakpoints using setBreakpointByUrl so they auto-apply
 		// when matching scripts load (we're paused at line 0, scripts not loaded yet)
@@ -190,7 +286,7 @@ async function handleRestart(): Promise<Response> {
 		for (const bp of savedBreakpoints) {
 			try {
 				const urlRegex = `.*${bp.file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
-				const result = (await cdp.send("Debugger.setBreakpointByUrl", {
+				const result = (await session.cdp.send("Debugger.setBreakpointByUrl", {
 					lineNumber: bp.line,
 					urlRegex,
 					columnNumber: 0,
@@ -212,7 +308,7 @@ async function handleRestart(): Promise<Response> {
 					enabled: true,
 					cdpBreakpointId: result.breakpointId,
 				};
-				state.breakpoints.set(result.breakpointId, newBp);
+				session.state.breakpoints.set(result.breakpointId, newBp);
 				restored.push(result.breakpointId);
 			} catch {
 				// Skip breakpoints that can't be restored
@@ -222,10 +318,11 @@ async function handleRestart(): Promise<Response> {
 		return {
 			ok: true,
 			connected: true,
-			status: state.paused ? "paused" : "running",
-			pid: state.pid ?? undefined,
+			status: session.state.paused ? "paused" : "running",
+			pid: session.state.pid ?? undefined,
+			s: session.name,
 			messages: [
-				`restarted pid=${state.pid}`,
+				`restarted pid=${session.state.pid}`,
 				`restored ${restored.length}/${savedBreakpoints.length} breakpoints`,
 			],
 		};
@@ -234,70 +331,188 @@ async function handleRestart(): Promise<Response> {
 	}
 }
 
-// ─── Dispatch ───
+// ─── Session management commands ───
 
-async function dispatch(cmd: Command): Promise<Response> {
-	switch (cmd.cmd) {
-		case "open":
-			return handleOpen(cmd.args);
-		case "close":
-			return handleClose();
-		case "run":
-			return handleRun(cmd.args);
-		case "restart":
-			return handleRestart();
-		case "status":
-			return handleStatus(cdp, state);
-		case "c":
-			return handleContinue(cdp, state);
-		case "s":
-			return handleStepInto(cdp, state);
-		case "n":
-			return handleStepOver(cdp, state);
-		case "o":
-			return handleStepOut(cdp, state);
-		case "pause":
-			return handlePause(cdp, state);
-		case "b":
-			return handleSetBreakpoint(cdp, state, cmd.args);
-		case "db":
-			return handleDeleteBreakpoint(cdp, state, cmd.args);
-		case "bl":
-			return handleListBreakpoints(cdp, state);
-		case "e":
-			return handleEval(cdp, state, cmd.args);
-		case "src":
-			return handleSource(cdp, state, cmd.args);
-		case "trace":
-			return handleTrace(store, cmd.args);
-		case "health":
-			return handleHealth(cdp, state);
-		case "reconnect":
-			return handleReconnect(cdp, state, store);
-		case "q":
-			return handleQuery(cmd.args);
-		default:
-			return { ok: false, error: `unknown command: ${(cmd as { cmd: string }).cmd}` };
+async function handleSessions(): Promise<Response> {
+	const infos: SessionInfo[] = [];
+	for (const [name, session] of registry.sessions) {
+		infos.push({
+			name,
+			connected: session.state.connected,
+			paused: session.state.paused,
+			targetType: session.targetType,
+			port: session.port,
+			host: session.host,
+			pid: session.state.pid,
+			current: name === registry.current,
+		});
 	}
+	return {
+		ok: true,
+		columns: [
+			"name",
+			"connected",
+			"paused",
+			"type",
+			"port",
+			"host",
+			"pid",
+			"current",
+		],
+		rows: infos.map((i) => [
+			i.name,
+			i.connected,
+			i.paused,
+			i.targetType,
+			i.port,
+			i.host,
+			i.pid,
+			i.current,
+		]),
+		sessions: infos,
+	};
 }
 
-async function handleQuery(queryStr: string): Promise<Response> {
+async function handleUse(name: string): Promise<Response> {
+	if (!registry.sessions.has(name)) {
+		return { ok: false, error: `no session named "${name}"` };
+	}
+	registry.current = name;
+	return { ok: true, messages: [`current session: ${name}`] };
+}
+
+// ─── Query ───
+
+async function handleQuery(
+	queryStr: string,
+	session: Session | null,
+): Promise<Response> {
 	try {
-		// Dynamic import — the query engine may not exist yet
+		// Dynamic import -- the query engine may not exist yet
 		const mod = (await import("./query/engine.js")) as {
 			executeQuery: (
 				query: string,
 				executor: CdpClientWrapper,
 			) => Promise<{ columns: string[]; rows: unknown[][] }>;
 		};
-		const result = await mod.executeQuery(queryStr, cdp);
+
+		// Determine which executor to use
+		let executor: CdpClientWrapper;
+		if (session) {
+			executor = session.cdp;
+		} else if (registry.sessions.size > 0) {
+			// No explicit session; use first available session's cdp
+			const first = registry.sessions.values().next().value;
+			executor = first ? first.cdp : new CdpClientWrapper(createState(), store);
+		} else {
+			// No sessions at all; create a minimal executor with empty state and the store
+			const emptyState = createState();
+			executor = new CdpClientWrapper(emptyState, store);
+		}
+
+		const result = await mod.executeQuery(queryStr, executor);
 		return { ok: true, columns: result.columns, rows: result.rows };
 	} catch (e) {
 		const msg = (e as Error).message;
-		if (msg.includes("Cannot find module") || msg.includes("MODULE_NOT_FOUND")) {
+		if (
+			msg.includes("Cannot find module") ||
+			msg.includes("MODULE_NOT_FOUND")
+		) {
 			return { ok: false, error: "query engine not available" };
 		}
 		return { ok: false, error: msg };
+	}
+}
+
+// ─── Dispatch ───
+
+async function dispatch(cmd: Command): Promise<Response> {
+	const sessionName = cmd.s;
+
+	switch (cmd.cmd) {
+		case "open":
+			return handleOpen(cmd.args, sessionName);
+		case "run":
+			return handleRun(cmd.args, sessionName);
+		case "ss":
+			return handleSessions();
+		case "use":
+			return handleUse(cmd.args);
+		default: {
+			// Commands that work without sessions
+			if (cmd.cmd === "close" && registry.sessions.size === 0) {
+				return { ok: true, messages: ["no sessions to close"] };
+			}
+			if (cmd.cmd === "status" && registry.sessions.size === 0) {
+				return { ok: true, connected: false };
+			}
+			if (cmd.cmd === "health" && registry.sessions.size === 0) {
+				return { ok: false, error: "not connected" };
+			}
+
+			const session = resolveSession(sessionName);
+			if (!session) {
+				if (registry.sessions.size === 0) {
+					return {
+						ok: false,
+						error: "no active session; use open or run first",
+					};
+				}
+				return {
+					ok: false,
+					error: "multiple sessions; specify @name or use <name>",
+				};
+			}
+
+			return dispatchToSession(cmd, session);
+		}
+	}
+}
+
+async function dispatchToSession(
+	cmd: Command,
+	session: Session,
+): Promise<Response> {
+	switch (cmd.cmd) {
+		case "close":
+			return handleClose(session);
+		case "restart":
+			return handleRestart(session);
+		case "status":
+			return handleStatus(session.cdp, session.state);
+		case "c":
+			return handleContinue(session.cdp, session.state);
+		case "s":
+			return handleStepInto(session.cdp, session.state);
+		case "n":
+			return handleStepOver(session.cdp, session.state);
+		case "o":
+			return handleStepOut(session.cdp, session.state);
+		case "pause":
+			return handlePause(session.cdp, session.state);
+		case "b":
+			return handleSetBreakpoint(session.cdp, session.state, cmd.args);
+		case "db":
+			return handleDeleteBreakpoint(session.cdp, session.state, cmd.args);
+		case "bl":
+			return handleListBreakpoints(session.cdp, session.state);
+		case "e":
+			return handleEval(session.cdp, session.state, cmd.args);
+		case "src":
+			return handleSource(session.cdp, session.state, cmd.args);
+		case "trace":
+			return handleTrace(store, cmd.args);
+		case "health":
+			return handleHealth(session.cdp, session.state);
+		case "reconnect":
+			return handleReconnect(session.cdp, session.state, store);
+		case "q":
+			return handleQuery(cmd.args, session);
+		default:
+			return {
+				ok: false,
+				error: `unknown command: ${(cmd as { cmd: string }).cmd}`,
+			};
 	}
 }
 
@@ -360,10 +575,13 @@ function startServer(): void {
 		} catch {
 			// ignore
 		}
-		if (managedChild) {
-			killTarget(managedChild);
+		for (const session of registry.sessions.values()) {
+			if (session.managedChild) {
+				killTarget(session.managedChild);
+			}
+			session.cdp.disconnect();
 		}
-		cdp.disconnect();
+		registry.sessions.clear();
 		store.close();
 		server.close();
 	}

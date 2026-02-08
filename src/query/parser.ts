@@ -183,9 +183,7 @@ class Parser {
 	private expectKeyword(kw: string): void {
 		const t = this.advance();
 		if (!t || t.type !== "keyword" || t.value !== kw) {
-			throw new Error(
-				`Expected keyword '${kw}', got '${t?.value ?? "EOF"}'`,
-			);
+			throw new Error(`Expected keyword '${kw}', got '${t?.value ?? "EOF"}'`);
 		}
 	}
 
@@ -232,10 +230,7 @@ class Parser {
 
 	private parseAndExpr(): WhereExpr {
 		let left = this.parsePrimaryExpr();
-		while (
-			this.peek()?.type === "keyword" &&
-			this.peek()?.value === "AND"
-		) {
+		while (this.peek()?.type === "keyword" && this.peek()?.value === "AND") {
 			this.advance();
 			const right = this.parsePrimaryExpr();
 			left = { type: "and", left, right };
@@ -291,10 +286,7 @@ class Parser {
 		column: string;
 		direction: "ASC" | "DESC";
 	} | null {
-		if (
-			this.peek()?.type === "keyword" &&
-			this.peek()?.value === "ORDER"
-		) {
+		if (this.peek()?.type === "keyword" && this.peek()?.value === "ORDER") {
 			this.advance();
 			this.expectKeyword("BY");
 			const column = this.expectIdent();
@@ -311,14 +303,13 @@ class Parser {
 	}
 
 	private parseOptionalLimit(): number | null {
-		if (
-			this.peek()?.type === "keyword" &&
-			this.peek()?.value === "LIMIT"
-		) {
+		if (this.peek()?.type === "keyword" && this.peek()?.value === "LIMIT") {
 			this.advance();
 			const t = this.advance();
 			if (!t || t.type !== "number") {
-				throw new Error(`Expected number after LIMIT, got '${t?.value ?? "EOF"}'`);
+				throw new Error(
+					`Expected number after LIMIT, got '${t?.value ?? "EOF"}'`,
+				);
 			}
 			return Number(t.value);
 		}

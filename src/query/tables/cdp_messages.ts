@@ -1,7 +1,15 @@
 import type { CdpExecutor } from "../../protocol.js";
 import type { VirtualTable } from "./index.js";
 
-const COLUMNS = ["id", "ts", "direction", "method", "latency_ms", "error", "data"];
+const COLUMNS = [
+	"id",
+	"ts",
+	"direction",
+	"method",
+	"latency_ms",
+	"error",
+	"data",
+];
 
 export const cdpTable: VirtualTable = {
 	name: "cdp",

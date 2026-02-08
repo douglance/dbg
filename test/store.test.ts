@@ -56,7 +56,9 @@ describe("EventStore", () => {
 		await sleep(200);
 
 		const reader = new DatabaseSync(dbPath);
-		const row = reader.prepare("SELECT COUNT(*) AS count FROM events").get() as {
+		const row = reader
+			.prepare("SELECT COUNT(*) AS count FROM events")
+			.get() as {
 			count: number;
 		};
 		reader.close();

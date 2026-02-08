@@ -13,15 +13,17 @@ function mockHttpWithBody(body: string): MockReq {
 	req.destroy = vi.fn();
 	req.setTimeout = vi.fn();
 
-	vi.spyOn(http, "get").mockImplementation((_url: string, cb: (res: EventEmitter) => void) => {
-		const res = new EventEmitter();
-		cb(res);
-		queueMicrotask(() => {
-			res.emit("data", Buffer.from(body, "utf8"));
-			res.emit("end");
-		});
-		return req as any;
-	});
+	vi.spyOn(http, "get").mockImplementation(
+		(_url: string, cb: (res: EventEmitter) => void) => {
+			const res = new EventEmitter();
+			cb(res);
+			queueMicrotask(() => {
+				res.emit("data", Buffer.from(body, "utf8"));
+				res.emit("end");
+			});
+			return req as any;
+		},
+	);
 	return req;
 }
 
@@ -37,13 +39,28 @@ describe("cdp discovery", () => {
 				{ type: "node", webSocketDebuggerUrl: "ws://node-target" },
 			]),
 		);
-		await expect(discoverTarget(9229)).resolves.toBe("ws://node-target");
+		await expect(discoverTarget(9229)).resolves.toEqual({
+			wsUrl: "ws://node-target",
+			type: "node",
+		});
 	});
 
-	it("errors when no node target exists", async () => {
-		mockHttpWithBody(JSON.stringify([{ type: "page", webSocketDebuggerUrl: "ws://page" }]));
-		await expect(discoverTarget(9229, "localhost")).rejects.toThrow(
-			"no debuggable Node.js target on localhost:9229",
+	it("falls back to page target when no node target exists", async () => {
+		mockHttpWithBody(
+			JSON.stringify([{ type: "page", webSocketDebuggerUrl: "ws://page" }]),
+		);
+		await expect(discoverTarget(9229, "localhost")).resolves.toEqual({
+			wsUrl: "ws://page",
+			type: "page",
+		});
+	});
+
+	it("errors when explicit node type requested but only page exists", async () => {
+		mockHttpWithBody(
+			JSON.stringify([{ type: "page", webSocketDebuggerUrl: "ws://page" }]),
+		);
+		await expect(discoverTarget(9229, "localhost", "node")).rejects.toThrow(
+			"no debuggable node target on localhost:9229",
 		);
 	});
 
@@ -58,10 +75,12 @@ describe("cdp discovery", () => {
 		const req = new EventEmitter() as MockReq;
 		req.destroy = vi.fn();
 		req.setTimeout = vi.fn();
-		vi.spyOn(http, "get").mockImplementation((_url: string, _cb: (res: EventEmitter) => void) => {
-			queueMicrotask(() => req.emit("error", new Error("ECONNREFUSED")));
-			return req as any;
-		});
+		vi.spyOn(http, "get").mockImplementation(
+			(_url: string, _cb: (res: EventEmitter) => void) => {
+				queueMicrotask(() => req.emit("error", new Error("ECONNREFUSED")));
+				return req as any;
+			},
+		);
 
 		await expect(discoverTarget(9229, "10.0.0.5")).rejects.toThrow(
 			"cannot reach debugger at 10.0.0.5:9229: ECONNREFUSED",
@@ -75,9 +94,13 @@ describe("cdp discovery", () => {
 			queueMicrotask(cb);
 		});
 
-		vi.spyOn(http, "get").mockImplementation((_url: string, _cb: (res: EventEmitter) => void) => req as any);
+		vi.spyOn(http, "get").mockImplementation(
+			(_url: string, _cb: (res: EventEmitter) => void) => req as any,
+		);
 
-		await expect(discoverTarget(9229)).rejects.toThrow("timeout connecting to 127.0.0.1:9229");
+		await expect(discoverTarget(9229)).rejects.toThrow(
+			"timeout connecting to 127.0.0.1:9229",
+		);
 		expect(req.destroy).toHaveBeenCalled();
 	});
 });

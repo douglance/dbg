@@ -2,22 +2,22 @@
 
 import type { CdpExecutor } from "../../protocol.js";
 import type { WhereExpr } from "../parser.js";
-import { framesTable } from "./frames.js";
-import { scopesTable } from "./scopes.js";
-import { varsTable } from "./vars.js";
-import { thisTable } from "./this.js";
-import { propsTable } from "./props.js";
-import { protoTable } from "./proto.js";
-import { breakpointsTable } from "./breakpoints.js";
-import { scriptsTable } from "./scripts.js";
-import { sourceTable } from "./source.js";
-import { consoleTable } from "./console.js";
-import { exceptionsTable } from "./exceptions.js";
 import { asyncFramesTable } from "./async_frames.js";
-import { listenersTable } from "./listeners.js";
-import { eventsTable } from "./events.js";
+import { breakpointsTable } from "./breakpoints.js";
 import { cdpMessagesTable, cdpTable } from "./cdp_messages.js";
 import { connectionsTable } from "./connections.js";
+import { consoleTable } from "./console.js";
+import { eventsTable } from "./events.js";
+import { exceptionsTable } from "./exceptions.js";
+import { framesTable } from "./frames.js";
+import { listenersTable } from "./listeners.js";
+import { propsTable } from "./props.js";
+import { protoTable } from "./proto.js";
+import { scopesTable } from "./scopes.js";
+import { scriptsTable } from "./scripts.js";
+import { sourceTable } from "./source.js";
+import { thisTable } from "./this.js";
+import { varsTable } from "./vars.js";
 
 export interface VirtualTable {
 	name: string;

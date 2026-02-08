@@ -74,7 +74,12 @@ function evaluateExpr(
 function evaluateComparison(
 	columns: string[],
 	row: unknown[],
-	expr: { type: "comparison"; column: string; op: string; value: string | number },
+	expr: {
+		type: "comparison";
+		column: string;
+		op: string;
+		value: string | number;
+	},
 ): boolean {
 	const idx = columns.indexOf(expr.column);
 	if (idx === -1) return false;
@@ -95,7 +100,9 @@ function evaluateComparison(
 	const cellNum = Number(cellValue);
 	const filterNum = Number(filterValue);
 	const cellIsNumeric = cellStr !== "" && !Number.isNaN(cellNum);
-	const filterIsNumeric = typeof filterValue === "number" || (String(filterValue) !== "" && !Number.isNaN(filterNum));
+	const filterIsNumeric =
+		typeof filterValue === "number" ||
+		(String(filterValue) !== "" && !Number.isNaN(filterNum));
 
 	if (cellIsNumeric && filterIsNumeric) {
 		switch (expr.op) {

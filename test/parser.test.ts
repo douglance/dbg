@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseQuery } from "../src/query/parser.js";
 
 describe("parser", () => {
@@ -55,9 +55,7 @@ describe("parser", () => {
 	});
 
 	it("parses WHERE with OR", () => {
-		const q = parseQuery(
-			"SELECT * FROM vars WHERE name = 'x' OR name = 'y'",
-		);
+		const q = parseQuery("SELECT * FROM vars WHERE name = 'x' OR name = 'y'");
 		expect(q.where).not.toBeNull();
 		if (!q.where) throw new Error("Expected WHERE clause");
 		expect(q.where.type).toBe("or");

@@ -20,7 +20,9 @@ class FakeClient extends EventEmitter {
 		})),
 		removeBreakpoint: vi.fn(async () => {}),
 		getScriptSource: vi.fn(async () => ({ scriptSource: "" })),
-		evaluateOnCallFrame: vi.fn(async () => ({ result: { type: "string", value: "" } })),
+		evaluateOnCallFrame: vi.fn(async () => ({
+			result: { type: "string", value: "" },
+		})),
 	};
 	Runtime = {
 		enable: vi.fn(async () => {}),
@@ -37,7 +39,9 @@ describe("cdp client wrapper", () => {
 
 	it("forwards send and throws when not connected", async () => {
 		const wrapper = new CdpClientWrapper(createState());
-		await expect(wrapper.send("Runtime.evaluate")).rejects.toThrow("not connected");
+		await expect(wrapper.send("Runtime.evaluate")).rejects.toThrow(
+			"not connected",
+		);
 
 		const client = new FakeClient();
 		(wrapper as any).client = client;
@@ -115,7 +119,9 @@ describe("cdp client wrapper", () => {
 					functionName: "",
 					location: { scriptId: "s1", lineNumber: 3, columnNumber: 2 },
 					url: "file:///abs/main.ts",
-					scopeChain: [{ type: "local", name: "Local", object: { objectId: "scope-1" } }],
+					scopeChain: [
+						{ type: "local", name: "Local", object: { objectId: "scope-1" } },
+					],
 					this: { objectId: "this-1" },
 				},
 			],
