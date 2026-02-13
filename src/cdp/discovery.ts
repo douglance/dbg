@@ -12,6 +12,57 @@ interface TargetInfo {
 
 export type TargetType = "node" | "page";
 
+export interface TargetListEntry {
+	id: string;
+	type: string;
+	title: string;
+	url: string;
+}
+
+export function listTargets(
+	port: number,
+	host = "127.0.0.1",
+): Promise<TargetListEntry[]> {
+	return new Promise((resolve, reject) => {
+		const req = http.get(`http://${host}:${port}/json`, (res) => {
+			let body = "";
+			res.on("data", (chunk: Buffer) => {
+				body += chunk.toString();
+			});
+			res.on("end", () => {
+				try {
+					const targets = JSON.parse(body) as TargetInfo[];
+					resolve(
+						targets
+							.filter((t) => t.webSocketDebuggerUrl)
+							.map((t) => ({
+								id: t.id,
+								type: t.type,
+								title: t.title,
+								url: t.url,
+							})),
+					);
+				} catch (e) {
+					reject(
+						new Error(
+							`failed to parse /json response: ${(e as Error).message}`,
+						),
+					);
+				}
+			});
+		});
+		req.on("error", (e) => {
+			reject(
+				new Error(`cannot reach debugger at ${host}:${port}: ${e.message}`),
+			);
+		});
+		req.setTimeout(5000, () => {
+			req.destroy();
+			reject(new Error(`timeout connecting to ${host}:${port}`));
+		});
+	});
+}
+
 export interface DiscoveredTarget {
 	wsUrl: string;
 	type: TargetType;
