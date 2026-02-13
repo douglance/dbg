@@ -45,7 +45,10 @@ async function fetchCdpRows(
 				WHEN source = 'cdp_recv' THEN 'recv'
 				ELSE source
 			END AS direction,
-			method,
+			CASE
+				WHEN method LIKE '%.undefined' THEN substr(method, 1, length(method) - 10)
+				ELSE method
+			END AS method,
 			json_extract(data, '$.latencyMs') AS latency_ms,
 			json_extract(data, '$.error') AS error,
 			data

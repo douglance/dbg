@@ -1,0 +1,20 @@
+{
+	"name": "@dbg/tables-core",
+	"version": "0.2.0",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"dependencies": {
+		"@dbg/query": "workspace:*",
+		"@dbg/types": "workspace:*"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json"
+	}
+}

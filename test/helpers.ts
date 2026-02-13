@@ -1,20 +1,54 @@
 import { vi } from "vitest";
-import type { CdpExecutor, DaemonState } from "../src/protocol.js";
+import {
+	CDP_CAPABILITIES,
+	type CdpState,
+	type CdpExecutor,
+	type DaemonState,
+	type DapState,
+} from "../packages/types/src/index.js";
 
-export function createState(overrides: Partial<DaemonState> = {}): DaemonState {
+type StateOverrides = Omit<Partial<DaemonState>, "cdp" | "dap"> & {
+	cdp?: Partial<CdpState>;
+	dap?: Partial<DapState>;
+};
+
+export function createState(overrides: StateOverrides = {}): DaemonState {
+	const { cdp: cdpOverrides, dap: dapOverrides, ...rest } = overrides;
+	const defaultCdp: CdpState = {
+		lastWsUrl: null,
+		networkRequests: new Map(),
+		pageEvents: [],
+		wsFrames: [],
+		coverageSnapshot: null,
+	};
+	const defaultDap: DapState = {
+		threadId: null,
+		activeThreads: [],
+		registers: [],
+		modules: [],
+		targetTriple: "",
+	};
+
 	return {
 		connected: false,
 		paused: false,
 		pid: null,
 		managedCommand: null,
-		lastWsUrl: null,
 		callFrames: [],
 		asyncStackTrace: [],
 		breakpoints: new Map(),
 		scripts: new Map(),
 		console: [],
 		exceptions: [],
-		...overrides,
+		cdp: {
+			...defaultCdp,
+			...(cdpOverrides ?? {}),
+		},
+		dap: {
+			...defaultDap,
+			...(dapOverrides ?? {}),
+		},
+		...rest,
 	};
 }
 
@@ -34,7 +68,12 @@ export function createExecutor(
 	);
 	const getState = vi.fn(() => state);
 	return {
-		executor: { send, getState },
+		executor: {
+			send,
+			getState,
+			protocol: "cdp",
+			capabilities: CDP_CAPABILITIES,
+		},
 		send,
 		getState,
 	};

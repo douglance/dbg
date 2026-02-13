@@ -1,44 +1,29 @@
 {
-  "name": "@douglance/dbg",
-  "version": "0.1.0",
-  "description": "Stateless, non-interactive Node.js debugger built for automation",
+  "name": "@dbg/workspace",
+  "version": "0.2.0",
+  "private": true,
   "type": "module",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/douglance/dbg.git"
-  },
-  "keywords": ["debugger", "cdp", "devtools", "automation", "cli", "nodejs"],
   "engines": {
     "node": ">=22"
   },
-  "bin": {
-    "dbg": "./bin/dbg"
-  },
-  "files": ["dist", "bin", "README.md", "LICENSE"],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
-    "build": "tsup",
-    "prepublishOnly": "npm run build",
-    "test": "vitest run",
+    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "prepublishOnly": "pnpm run build",
+    "test": "pnpm run build && vitest run",
     "test:watch": "vitest",
-    "lint": "biome lint --error-on-warnings src test tsup.config.ts vitest.config.ts",
-    "lint:fix": "biome lint --write --unsafe src test tsup.config.ts vitest.config.ts",
-    "format": "biome format --write src/",
+    "lint": "biome lint --error-on-warnings packages test",
+    "lint:fix": "biome lint --write --unsafe packages test",
+    "format": "biome format --write packages test",
     "check": "tsc --noEmit",
-    "format:check": "biome format --error-on-warnings src test tsup.config.ts vitest.config.ts",
-    "ci": "npm run lint && npm run format:check && npm run check && npm run build && npm test"
-  },
-  "dependencies": {
-    "chrome-remote-interface": "^0.33.2"
+    "format:check": "biome format --error-on-warnings packages test",
+    "ci": "pnpm run lint && pnpm run format:check && pnpm run check && pnpm run build && pnpm run test"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.13.1",
+    "@vscode/debugprotocol": "^1.68.0",
     "devtools-protocol": "^0.0.1581282",
-    "tsup": "^8.3.6",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   }

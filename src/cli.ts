@@ -65,14 +65,33 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 	switch (command) {
 		case "open": {
 			if (!rest) {
-				error("usage: dbg open <port|host:port> [session-name]");
+				error(
+					"usage: dbg open <port|host:port> [--type page|node] [--target <id>]",
+				);
 				return null;
 			}
-			// Split: first token is port/host:port, second is optional session name
+			// Extract positional args (port and optional session name) from
+			// the tokens, skipping flags and their values.
 			const openParts = cmdArgs.slice(1);
-			const portArg = openParts[0];
-			const openSessionName = openParts[1] || sessionName;
-			const cmd: Command = { cmd: "open", args: portArg };
+			const positional: string[] = [];
+			const flagTokens: string[] = [];
+			for (let i = 0; i < openParts.length; i++) {
+				if (openParts[i] === "--type" || openParts[i] === "--target") {
+					flagTokens.push(openParts[i]);
+					if (i + 1 < openParts.length) {
+						flagTokens.push(openParts[i + 1]);
+						i++;
+					}
+				} else {
+					positional.push(openParts[i]);
+				}
+			}
+			// positional[0] = port/host:port, positional[1] = optional session name
+			const portArg = positional[0];
+			const openSessionName = positional[1] || sessionName;
+			// Build args for daemon: port + flags (no session name)
+			const daemonArgs = [portArg, ...flagTokens].join(" ");
+			const cmd: Command = { cmd: "open", args: daemonArgs };
 			if (openSessionName) cmd.s = openSessionName;
 			return { cmd, jsonMode };
 		}
@@ -167,6 +186,101 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 			}
 			return { cmd: { cmd: "use", args: rest }, jsonMode };
 
+		case "navigate": {
+			if (!rest) {
+				error("usage: dbg navigate <url|reload|back|forward>");
+				return null;
+			}
+			return { cmd: withSession({ cmd: "navigate", args: rest }), jsonMode };
+		}
+
+		case "screenshot": {
+			return {
+				cmd: withSession({ cmd: "screenshot", args: queryArgs || undefined }),
+				jsonMode,
+			};
+		}
+
+		case "click": {
+			if (!rest) {
+				error('usage: dbg click "<selector>"');
+				return null;
+			}
+			return { cmd: withSession({ cmd: "click", args: rest }), jsonMode };
+		}
+
+		case "type": {
+			if (!rest) {
+				error('usage: dbg type "<selector>" "<text>"');
+				return null;
+			}
+			return { cmd: withSession({ cmd: "type", args: rest }), jsonMode };
+		}
+
+		case "select": {
+			if (!rest) {
+				error('usage: dbg select "<selector>" "<value>"');
+				return null;
+			}
+			return { cmd: withSession({ cmd: "select", args: rest }), jsonMode };
+		}
+
+		case "mock": {
+			if (!rest) {
+				error("usage: dbg mock <url-pattern> <json-body> [--status <code>]");
+				return null;
+			}
+			return { cmd: withSession({ cmd: "mock", args: rest }), jsonMode };
+		}
+
+		case "unmock": {
+			return {
+				cmd: withSession({ cmd: "unmock", args: rest || undefined }),
+				jsonMode,
+			};
+		}
+
+		case "emulate": {
+			if (!rest) {
+				error("usage: dbg emulate <device|reset>");
+				return null;
+			}
+			return {
+				cmd: withSession({ cmd: "emulate", args: rest }),
+				jsonMode,
+			};
+		}
+
+		case "throttle": {
+			if (!rest) {
+				error("usage: dbg throttle <preset|off>");
+				return null;
+			}
+			return {
+				cmd: withSession({ cmd: "throttle", args: rest }),
+				jsonMode,
+			};
+		}
+
+		case "coverage": {
+			if (!rest) {
+				error("usage: dbg coverage start|stop");
+				return null;
+			}
+			return {
+				cmd: withSession({ cmd: "coverage", args: rest }),
+				jsonMode,
+			};
+		}
+
+		case "targets": {
+			if (!rest) {
+				error("usage: dbg targets <port|host:port>");
+				return null;
+			}
+			return { cmd: { cmd: "targets", args: rest }, jsonMode };
+		}
+
 		default:
 			error(`unknown command: ${command}`);
 			printUsage();
@@ -199,6 +313,17 @@ commands:
   trace [limit]            Show recent CDP messages
   health                   Verify debugger connection health
   reconnect                Reconnect to last websocket target
+  navigate <url|reload|back>  Navigate browser page
+  screenshot [file]           Capture page screenshot
+  click "<selector>"         Click element
+  type "<selector>" "<text>" Type into element
+  select "<selector>" "<val>" Select dropdown option
+  mock <pattern> <body>      Mock network response
+  unmock [pattern]            Remove mock(s)
+  emulate <device|reset>     Emulate mobile device
+  throttle <preset|off>      Throttle network
+  coverage start|stop        Track code coverage
+  targets <port>             List debuggable targets
   q <query>                Run SQL query
 
 Session targeting: @name prefix targets a session (e.g., dbg @be c)
@@ -218,6 +343,9 @@ LIFECYCLE
   dbg open 9229                     Local port (auto-named session).
   dbg open 9229 be                  Named session "be".
   dbg open 192.168.1.5:9229 remote  Remote host, named "remote".
+  dbg open 9222 --type page            Explicitly target browser page.
+  dbg open 9222 --target <id>          Connect to specific tab by ID.
+  dbg targets 9222                     List all debuggable targets.
   dbg close                         Disconnect session. If started via 'run',
                                     also kills the target process.
   dbg run "<command>"               Spawn with --inspect-brk, connect.
@@ -263,10 +391,46 @@ INSPECTION
   dbg health                     Probe Runtime.evaluate("1+1"), report latency.
   dbg reconnect                  Reconnect to the last known websocket URL.
 
+BROWSER
+  dbg navigate <url>           Navigate to URL.
+  dbg navigate reload          Reload current page.
+  dbg navigate back            Go back in history.
+  dbg navigate forward         Go forward in history.
+  dbg screenshot               Capture screenshot (returns base64 PNG).
+  dbg screenshot /tmp/page.png Save screenshot to file.
+  dbg click "button.submit"                 Click element by CSS selector.
+  dbg type "input#email" "user@test.com"    Type text into an element.
+  dbg select "select#country" "US"          Select dropdown option.
+
+NETWORK MOCKING
+  dbg mock "/api/users" '{"users":[]}'     Intercept URL, return mock JSON.
+  dbg mock "/api/data" '{}' --status 500    Return specific HTTP status.
+  dbg unmock "/api/users"                   Remove specific mock.
+  dbg unmock                                Remove all mocks.
+
+EMULATION
+  dbg emulate iphone-14    Emulate iPhone 14 (390x844).
+  dbg emulate ipad         Emulate iPad (810x1080).
+  dbg emulate pixel-7      Emulate Pixel 7 (412x915).
+  dbg emulate reset        Reset to default viewport.
+
+  dbg throttle 3g          Simulate 3G network.
+  dbg throttle slow-3g     Simulate slow 3G.
+  dbg throttle fast-3g     Simulate fast 3G.
+  dbg throttle 4g          Simulate 4G.
+  dbg throttle offline     Simulate offline.
+  dbg throttle off         Disable throttling.
+
+COVERAGE
+  dbg coverage start       Begin tracking JS + CSS usage.
+  dbg coverage stop        Stop tracking.
+  dbg q "SELECT * FROM coverage"   View coverage results.
+
 QUERY ENGINE (SQL-like)
   dbg q "<query>"                Run a SQL-like query against virtual tables.
   dbg q "SELECT * FROM frames"   Stack frames.
   dbg q "SELECT name, value FROM vars WHERE frame_id = 0"
+  dbg q "SELECT ts, stream, severity, summary FROM timeline ORDER BY ts DESC LIMIT 120"
 
   Syntax:
     SELECT [cols | *] FROM <table>
@@ -291,20 +455,47 @@ QUERY ENGINE (SQL-like)
     exceptions      Thrown exceptions (id, text, type, file, line, ts, uncaught)
     async_frames    Async stack traces (id, function, file, line, parent_id)
     listeners       Event listeners (requires WHERE object_id=)
-    events          Raw daemon/CDP event log (id, ts, source, category, method, data, session_id)
-    cdp             CDP-focused event view (id, ts, direction, method, latency_ms, error, data)
-    cdp_messages    Alias of cdp
-    connections     Connection lifecycle events (id, ts, event, session_id, data)
+	    events          Raw daemon/CDP event log (id, ts, source, category, method, data, session_id)
+	    cdp             CDP-focused event view (id, ts, direction, method, latency_ms, error, data)
+	    cdp_messages    Alias of cdp
+	    connections     Connection lifecycle events (id, ts, event, session_id, data)
+	    timeline        Unified issue timeline (id, ts, stream, method, severity, summary, ...)
+	    network         HTTP requests (id, method, url, status, type, duration_ms, size)
+    network_headers Request/response headers (requires WHERE request_id=)
+    network_body    Response body (requires WHERE request_id=)
+    page_events     Page lifecycle events (id, name, ts, frame_id, url)
+    dom             DOM elements (requires WHERE selector='<css>')
+    styles          Computed CSS (requires WHERE node_id=<id>)
+    performance     Runtime metrics (name, value)
+    cookies         Browser cookies (name, value, domain, path, ...)
+    storage         Web storage (requires WHERE type='local'|'session')
+    ws_frames       WebSocket frames (id, request_id, data, ts, direction)
+    coverage        Code coverage (url, total_bytes, used_bytes, used_pct)
 
   Drill-down pattern:
     dbg q "SELECT name, object_id FROM vars WHERE name = 'config'"
     dbg q "SELECT name, value FROM props WHERE object_id = '<id>'"
 
+  Postmortem mode (no active session required for event-backed tables):
+    dbg q "SELECT method FROM events ORDER BY id DESC LIMIT 20"
+    dbg q "SELECT ts, stream, severity, method, summary FROM timeline WHERE include = 'errors' ORDER BY ts DESC LIMIT 80"
+
 OUTPUT
   All data goes to stdout. Errors go to stderr.
   TSV format by default. Append \\j to any query for JSON output:
     dbg q "SELECT * FROM frames\\j"
-  Exit code 0 on success, 1 on error.`;
+  Exit code 0 on success, 1 on error.
+
+ENVIRONMENT
+  DBG_SOCK          Socket path for daemon (default: /tmp/dbg.sock)
+  DBG_EVENTS_DB     Event store path (default: /tmp/dbg-events.db)
+                    Set to a persistent path to accumulate history across runs.
+
+SELF-DEBUGGING
+  To debug dbg's own daemon, run a second instance on a different socket:
+    DBG_SOCK=/tmp/dbg2.sock DBG_EVENTS_DB=/tmp/dbg2-events.db \\
+      node --inspect-brk=9230 dist/daemon.js
+    dbg open 9230`;
 	process.stdout.write(`${help}\n`);
 }
 
@@ -349,6 +540,7 @@ async function ensureDaemon(): Promise<void> {
 	const child = fork(daemonPath, [], {
 		detached: true,
 		stdio: "ignore",
+		env: process.env,
 	});
 	child.unref();
 	child.disconnect?.();
@@ -357,10 +549,7 @@ async function ensureDaemon(): Promise<void> {
 	const deadline = Date.now() + 5000;
 	while (Date.now() < deadline) {
 		await new Promise((r) => setTimeout(r, 100));
-		if (fs.existsSync(SOCKET_PATH)) {
-			// Verify we can connect
-			if (await isDaemonRunning()) return;
-		}
+		if (await isDaemonRunning()) return;
 	}
 	throw new Error("daemon failed to start (socket not created)");
 }
@@ -394,7 +583,7 @@ function sendCommand(cmd: Command): Promise<Response> {
 
 		socket.on("error", (err) => {
 			reject(
-				new Error(`cannot connect to daemon: ${err.message}. Is it running?`),
+				new Error(`cannot connect to daemon at ${SOCKET_PATH}: ${err.message}`),
 			);
 		});
 
@@ -456,6 +645,14 @@ function formatResponse(
 	// Source view
 	if (cmd.cmd === "src" && r.value !== undefined) {
 		return r.value;
+	}
+
+	// Screenshot (no file path — print summary, data is in response JSON)
+	if (cmd.cmd === "screenshot" && r.data) {
+		if (jsonMode) {
+			return JSON.stringify({ data: r.data });
+		}
+		return `[base64 PNG: ${r.data.length} chars] (use \\j for data)`;
 	}
 
 	// Messages (run, restart, close, open)

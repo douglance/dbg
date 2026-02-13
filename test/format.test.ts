@@ -7,7 +7,7 @@ import {
 	formatSource,
 	formatStatus,
 	formatTsv,
-} from "../src/format.js";
+} from "../packages/cli/src/format.js";
 
 describe("formatTsv", () => {
 	it("produces header and rows", () => {

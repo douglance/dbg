@@ -3,7 +3,7 @@ import type { EventStore } from "./store.js";
 // CLI <-> Daemon protocol types
 // Shared between cli.ts and daemon.ts
 
-export const SOCKET_PATH = "/tmp/dbg.sock";
+export const SOCKET_PATH = process.env.DBG_SOCK ?? "/tmp/dbg.sock";
 
 // ─── CLI → Daemon request ───
 
@@ -31,6 +31,17 @@ export type Command = { s?: string } & (
 	| { cmd: "q"; args: string } // SQL query
 	| { cmd: "ss" } // list sessions
 	| { cmd: "use"; args: string } // switch current session
+	| { cmd: "navigate"; args: string } // url, "reload", "back", or "forward"
+	| { cmd: "screenshot"; args?: string } // optional file path
+	| { cmd: "click"; args: string } // CSS selector
+	| { cmd: "type"; args: string } // "selector" "text"
+	| { cmd: "select"; args: string } // "selector" "value"
+	| { cmd: "mock"; args: string } // url-pattern json-body [--status code]
+	| { cmd: "unmock"; args?: string } // optional url-pattern
+	| { cmd: "emulate"; args: string } // preset name or "reset"
+	| { cmd: "throttle"; args: string } // preset name or "off"
+	| { cmd: "coverage"; args: string } // "start" or "stop"
+	| { cmd: "targets"; args: string } // port or host:port
 );
 
 // ─── Daemon → CLI response ───
@@ -56,6 +67,8 @@ export interface OkResponse {
 	// Run/restart
 	messages?: string[];
 	latencyMs?: number;
+	// Screenshot
+	data?: string; // base64 data
 	// Session info
 	s?: string; // session name in response
 	sessions?: SessionInfo[];
@@ -107,6 +120,66 @@ export interface ExceptionEntry {
 	uncaught: boolean;
 }
 
+export interface NetworkRequest {
+	id: string;
+	url: string;
+	method: string;
+	status: number;
+	type: string;
+	mimeType: string;
+	startTime: number;
+	endTime: number;
+	duration: number;
+	size: number;
+	error: string;
+	requestHeaders: string; // JSON string
+	responseHeaders: string; // JSON string
+	initiator: string;
+}
+
+export interface PageEvent {
+	id: number;
+	name: string;
+	ts: number;
+	frameId: string;
+	url: string;
+}
+
+export interface WebSocketFrame {
+	id: number;
+	requestId: string;
+	opcode: number;
+	data: string;
+	ts: number;
+	direction: "sent" | "received";
+}
+
+export interface JsCoverageRange {
+	startOffset: number;
+	endOffset: number;
+	count: number;
+}
+
+export interface JsCoverageScript {
+	url: string;
+	functions: Array<{
+		ranges: JsCoverageRange[];
+	}>;
+}
+
+export interface CssCoverageEntry {
+	styleSheetId: string;
+	startOffset: number;
+	endOffset: number;
+	used: boolean;
+}
+
+export interface CoverageSnapshot {
+	js: JsCoverageScript[];
+	css: CssCoverageEntry[];
+	capturedAt: number;
+}
+
 export interface DaemonState {
 	connected: boolean;
 	paused: boolean;
@@ -123,6 +196,14 @@ export interface DaemonState {
 	scripts: Map<string, ScriptInfo>;
 	console: ConsoleEntry[];
 	exceptions: ExceptionEntry[];
+
+	// Browser state (page targets only)
+	networkRequests: Map<string, NetworkRequest>;
+	pageEvents: PageEvent[];
+	wsFrames: WebSocketFrame[];
+
+	// Coverage snapshots persisted at "coverage stop"
+	coverageSnapshot: CoverageSnapshot | null;
 }
 
 export interface CallFrameInfo {
@@ -162,6 +243,8 @@ export interface Session {
 	targetType: "node" | "page";
 	port: number;
 	host: string;
+	targetUrl?: string;
+	targetTitle?: string;
 }
 
 export interface SessionInfo {
@@ -173,6 +256,8 @@ export interface SessionInfo {
 	host: string;
 	pid: number | null;
 	current: boolean;
+	targetUrl?: string;
+	targetTitle?: string;
 }
 
 // ─── CDP executor interface for query tables ───

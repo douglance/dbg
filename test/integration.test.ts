@@ -4,8 +4,8 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-const CLI = path.resolve(__dirname, "../dist/cli.js");
-const SOCKET_PATH = "/tmp/dbg.sock";
+const CLI = path.resolve(__dirname, "../packages/cli/dist/cli.js");
+const SOCKET_PATH = "/tmp/dbg-test.sock";
 const TARGET = path.resolve(__dirname, "fixtures/target.js");
 const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-events.db");
 
@@ -22,6 +22,7 @@ function dbg(...args: string[]): {
 			timeout: 15000,
 			env: {
 				...process.env,
+				DBG_SOCK: SOCKET_PATH,
 				DBG_EVENTS_DB: EVENTS_DB_PATH,
 			},
 		});
@@ -63,6 +64,7 @@ function killDaemon(): void {
 					timeout: 5000,
 					env: {
 						...process.env,
+						DBG_SOCK: SOCKET_PATH,
 						DBG_EVENTS_DB: EVENTS_DB_PATH,
 					},
 				});
@@ -256,6 +258,55 @@ describe("integration", () => {
 		});
 	}
 
+	// ─── 0. Custom socket path ───
+
+	it("uses DBG_SOCK env var for custom socket path", async () => {
+		const customSocket = "/tmp/dbg-test-custom.sock";
+		// Clean up any stale socket
+		try {
+			fs.unlinkSync(customSocket);
+		} catch {
+			// ignore
+		}
+
+		try {
+			const r = execFileSync(process.execPath, [CLI, "status"], {
+				encoding: "utf8",
+				timeout: 15000,
+				env: {
+					...process.env,
+					DBG_SOCK: customSocket,
+					DBG_EVENTS_DB: EVENTS_DB_PATH,
+				},
+			});
+			expect(fs.existsSync(customSocket)).toBe(true);
+			expect(r).toContain("disconnected");
+		} finally {
+			// Kill daemon on custom socket
+			try {
+				const pids = execFileSync("lsof", ["-t", customSocket], {
+					encoding: "utf8",
+					timeout: 3000,
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim();
+				for (const pid of pids.split("\n").filter(Boolean)) {
+					try {
+						process.kill(Number.parseInt(pid, 10), "SIGTERM");
+					} catch {
+						// already dead
+					}
+				}
+			} catch {
+				// no process on socket
+			}
+			try {
+				fs.unlinkSync(customSocket);
+			} catch {
+				// ignore
+			}
+		}
+	});
+
 	// ─── 1. Daemon lifecycle ───
 
 	it("starts daemon, verifies socket exists, stops via close", async () => {
@@ -266,6 +317,12 @@ describe("integration", () => {
 		expect(r.exitCode).toBe(0);
 		// Status should show disconnected since we haven't opened anything
 		expect(r.stdout).toContain("disconnected");
+	});
+
+	it("runs query against event store without an active session", () => {
+		const q = dbg("q", "SELECT method FROM events ORDER BY id DESC LIMIT 5");
+		expect(q.exitCode).toBe(0);
+		expect(q.stdout).toContain("method");
 	});
 
 	// ─── 2. Open + Status + Close ───

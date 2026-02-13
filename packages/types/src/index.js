@@ -1,0 +1,62 @@
+// Shared protocol and state types used across packages.
+export const SOCKET_PATH = process.env.DBG_SOCK ?? "/tmp/dbg.sock";
+export const CDP_CAPABILITIES = {
+	breakpoints: true,
+	stepping: true,
+	evaluation: true,
+	stackFrames: true,
+	variables: true,
+	sourceView: true,
+	dom: true,
+	css: true,
+	network: true,
+	page: true,
+	storage: true,
+	emulation: true,
+	coverage: true,
+	registers: false,
+	memory: false,
+	disassembly: false,
+	watchpoints: false,
+};
+export const DAP_CAPABILITIES = {
+	breakpoints: true,
+	stepping: true,
+	evaluation: true,
+	stackFrames: true,
+	variables: true,
+	sourceView: true,
+	dom: false,
+	css: false,
+	network: false,
+	page: false,
+	storage: false,
+	emulation: false,
+	coverage: false,
+	registers: true,
+	memory: true,
+	disassembly: true,
+	watchpoints: true,
+};
+export function createEmptyDebuggerState() {
+	return {
+		connected: false,
+		paused: false,
+		pid: null,
+		managedCommand: null,
+		callFrames: [],
+		asyncStackTrace: [],
+		breakpoints: new Map(),
+		scripts: new Map(),
+		console: [],
+		exceptions: [],
+		cdp: {
+			lastWsUrl: null,
+			networkRequests: new Map(),
+			pageEvents: [],
+			wsFrames: [],
+			coverageSnapshot: null,
+		},
+	};
+}
+//# sourceMappingURL=index.js.map

@@ -1,0 +1,29 @@
+{
+	"name": "@dbg/cli",
+	"version": "0.2.0",
+	"type": "module",
+	"bin": {
+		"dbg": "./bin/dbg"
+	},
+	"main": "./dist/cli.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"dependencies": {
+		"@dbg/adapter-cdp": "workspace:*",
+		"@dbg/adapter-dap": "workspace:*",
+		"@dbg/query": "workspace:*",
+		"@dbg/store": "workspace:*",
+		"@dbg/tables-browser": "workspace:*",
+		"@dbg/tables-core": "workspace:*",
+		"@dbg/tables-native": "workspace:*",
+		"@dbg/types": "workspace:*"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json"
+	}
+}

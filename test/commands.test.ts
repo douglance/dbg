@@ -5,14 +5,19 @@ import {
 	handleEval,
 	handleListBreakpoints,
 	handlePause,
+	handleReconnect,
 	handleSetBreakpoint,
 	handleSource,
 	handleStatus,
 	handleStepInto,
 	handleStepOut,
 	handleStepOver,
-} from "../src/commands.js";
-import type { DaemonState, StoredBreakpoint } from "../src/protocol.js";
+} from "../packages/cli/src/commands.js";
+import type {
+	DaemonState,
+	StoredBreakpoint,
+} from "../packages/types/src/index.js";
+import { EventStore } from "../packages/store/src/index.js";
 import { createMockCdp, createState } from "./helpers.js";
 
 describe("commands", () => {
@@ -68,6 +73,29 @@ describe("commands", () => {
 			line: 12,
 			function: "main",
 		});
+	});
+
+	it("passes target type through reconnect", async () => {
+		if (state.cdp) {
+			state.cdp.lastWsUrl = "ws://127.0.0.1:9229/devtools/page/1";
+		}
+		const reconnectCdp = {
+			disconnect: vi.fn(async () => {}),
+			connect: vi.fn(async () => {}),
+		} as unknown as Parameters<typeof handleReconnect>[0];
+		const store = new EventStore();
+
+		const result = await handleReconnect(reconnectCdp, state, store, "page");
+		expect(result).toMatchObject({
+			ok: true,
+			connected: true,
+			messages: ["reconnected"],
+		});
+		expect((reconnectCdp as any).disconnect).toHaveBeenCalledTimes(1);
+		expect((reconnectCdp as any).connect).toHaveBeenCalledWith(
+			"ws://127.0.0.1:9229/devtools/page/1",
+			"page",
+		);
 	});
 
 	it("returns running when continue does not pause again in time", async () => {

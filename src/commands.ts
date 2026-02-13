@@ -125,6 +125,7 @@ export async function handleReconnect(
 	cdp: CdpClientWrapper,
 	state: DaemonState,
 	store: EventStore,
+	targetType?: "node" | "page",
 ): Promise<Response> {
 	if (!state.lastWsUrl) {
 		return { ok: false, error: "no previous websocket URL available" };
@@ -142,7 +143,7 @@ export async function handleReconnect(
 
 	try {
 		await cdp.disconnect();
-		await cdp.connect(state.lastWsUrl);
+		await cdp.connect(state.lastWsUrl, targetType);
 		store.record(
 			{
 				source: "daemon",

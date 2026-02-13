@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { CdpExecutor, DaemonState } from "../src/protocol.js";
-import type { WhereExpr } from "../src/query/parser.js";
-import { sourceTable } from "../src/query/tables/source.js";
+import {
+	CDP_CAPABILITIES,
+	type CdpExecutor,
+	type DaemonState,
+} from "../packages/types/src/index.js";
+import type { WhereExpr } from "../packages/query/src/parser.js";
+import { sourceTable } from "../packages/tables-core/src/source.js";
 
 function createState(): DaemonState {
 	return {
@@ -9,13 +13,19 @@ function createState(): DaemonState {
 		paused: true,
 		pid: null,
 		managedCommand: null,
-		lastWsUrl: null,
 		callFrames: [],
 		asyncStackTrace: [],
 		breakpoints: new Map(),
 		scripts: new Map(),
 		console: [],
 		exceptions: [],
+		cdp: {
+			lastWsUrl: null,
+			networkRequests: new Map(),
+			pageEvents: [],
+			wsFrames: [],
+			coverageSnapshot: null,
+		},
 	};
 }
 
@@ -42,6 +52,8 @@ describe("source table", () => {
 		let requestedScriptId = "";
 		const executor: CdpExecutor = {
 			getState: () => state,
+			protocol: "cdp",
+			capabilities: CDP_CAPABILITIES,
 			send: async (method, params) => {
 				expect(method).toBe("Debugger.getScriptSource");
 				requestedScriptId = (params as { scriptId: string }).scriptId;

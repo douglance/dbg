@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CdpClientWrapper } from "../src/cdp/client.js";
+import { CdpClientWrapper } from "../packages/adapter-cdp/src/client.js";
 import { createState } from "./helpers.js";
 
 class FakeClient extends EventEmitter {
@@ -213,6 +213,56 @@ describe("cdp client wrapper", () => {
 		expect(state.paused).toBe(false);
 		expect(state.callFrames).toEqual([]);
 		expect(state.asyncStackTrace).toEqual([]);
+	});
+
+	it("stores network duration in milliseconds", () => {
+		const state = createState();
+		const wrapper = new CdpClientWrapper(state);
+		const client = new FakeClient();
+		(wrapper as any).client = client;
+		(wrapper as any).setupEventHandlers();
+
+		client.emit("Network.requestWillBeSent", {
+			requestId: "r1",
+			request: {
+				url: "https://example.com/app.js",
+				method: "GET",
+				headers: {},
+			},
+			timestamp: 1.25,
+			initiator: { type: "script" },
+		});
+		client.emit("Network.loadingFinished", {
+			requestId: "r1",
+			timestamp: 1.75,
+			encodedDataLength: 1024,
+		});
+
+		expect(state.cdp?.networkRequests.get("r1")?.duration).toBe(500);
+	});
+
+	it("skips duplicate .undefined CDP event variants", () => {
+		const state = createState();
+		const record = vi.fn();
+		const wrapper = new CdpClientWrapper(state, { record } as any);
+		const client = new FakeClient();
+		(wrapper as any).client = client;
+		(wrapper as any).setupEventHandlers();
+
+		const payload = {
+			scriptId: "s2",
+			url: "file:///abs/other.ts",
+			startLine: 0,
+			endLine: 4,
+		};
+		client.emit("Debugger.scriptParsed.undefined", payload);
+		client.emit("Debugger.scriptParsed", payload);
+
+		const cdpRecvCalls = record.mock.calls.filter(
+			([event]) => event?.category === "cdp" && event?.source === "cdp_recv",
+		);
+		expect(cdpRecvCalls).toHaveLength(1);
+		expect(cdpRecvCalls[0][0].method).toBe("Debugger.scriptParsed");
 	});
 
 	it("disconnect resets state and tolerates close errors", async () => {

@@ -22,7 +22,7 @@ vi.mock("node:net", async () => {
 	};
 });
 
-import { killTarget, spawnTarget } from "../src/process.js";
+import { killTarget, spawnTarget } from "../packages/cli/src/process.js";
 
 function setupFreePort(port: number): void {
 	const server = new EventEmitter() as any;

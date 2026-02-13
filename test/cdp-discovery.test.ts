@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { discoverTarget } from "../src/cdp/discovery.js";
+import { discoverTarget } from "../packages/adapter-cdp/src/discovery.js";
 
 interface MockReq extends EventEmitter {
 	setTimeout: (ms: number, cb: () => void) => void;
@@ -13,17 +13,18 @@ function mockHttpWithBody(body: string): MockReq {
 	req.destroy = vi.fn();
 	req.setTimeout = vi.fn();
 
-	vi.spyOn(http, "get").mockImplementation(
-		(_url: string, cb: (res: EventEmitter) => void) => {
-			const res = new EventEmitter();
-			cb(res);
-			queueMicrotask(() => {
-				res.emit("data", Buffer.from(body, "utf8"));
-				res.emit("end");
-			});
-			return req as any;
-		},
-	);
+	vi.spyOn(http, "get").mockImplementation(((
+		_url: string | URL,
+		cb: (res: EventEmitter) => void,
+	) => {
+		const res = new EventEmitter();
+		cb(res);
+		queueMicrotask(() => {
+			res.emit("data", Buffer.from(body, "utf8"));
+			res.emit("end");
+		});
+		return req as any;
+	}) as any);
 	return req;
 }
 
@@ -75,12 +76,13 @@ describe("cdp discovery", () => {
 		const req = new EventEmitter() as MockReq;
 		req.destroy = vi.fn();
 		req.setTimeout = vi.fn();
-		vi.spyOn(http, "get").mockImplementation(
-			(_url: string, _cb: (res: EventEmitter) => void) => {
-				queueMicrotask(() => req.emit("error", new Error("ECONNREFUSED")));
-				return req as any;
-			},
-		);
+		vi.spyOn(http, "get").mockImplementation(((
+			_url: string | URL,
+			_cb: (res: EventEmitter) => void,
+		) => {
+			queueMicrotask(() => req.emit("error", new Error("ECONNREFUSED")));
+			return req as any;
+		}) as any);
 
 		await expect(discoverTarget(9229, "10.0.0.5")).rejects.toThrow(
 			"cannot reach debugger at 10.0.0.5:9229: ECONNREFUSED",
@@ -95,7 +97,8 @@ describe("cdp discovery", () => {
 		});
 
 		vi.spyOn(http, "get").mockImplementation(
-			(_url: string, _cb: (res: EventEmitter) => void) => req as any,
+			((_url: string | URL, _cb: (res: EventEmitter) => void) =>
+				req as any) as any,
 		);
 
 		await expect(discoverTarget(9229)).rejects.toThrow(

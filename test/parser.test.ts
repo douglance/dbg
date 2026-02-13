@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseQuery } from "../src/query/parser.js";
+import { parseQuery } from "../packages/query/src/parser.js";
 
 describe("parser", () => {
 	it("parses SELECT * FROM table", () => {

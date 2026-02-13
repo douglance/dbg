@@ -4,8 +4,8 @@ import * as net from "node:net";
 import * as path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
-const CLI = path.resolve(__dirname, "../dist/cli.js");
-const SOCKET_PATH = "/tmp/dbg.sock";
+const CLI = path.resolve(__dirname, "../packages/cli/dist/cli.js");
+const SOCKET_PATH = "/tmp/dbg-test.sock";
 const HANDLER = path.resolve(__dirname, "fixtures/handler.js");
 const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-demo-events.db");
 
@@ -18,7 +18,11 @@ function dbg(...args: string[]): {
 		const stdout = execFileSync(process.execPath, [CLI, ...args], {
 			encoding: "utf8",
 			timeout: 15000,
-			env: { ...process.env, DBG_EVENTS_DB: EVENTS_DB_PATH },
+			env: {
+				...process.env,
+				DBG_SOCK: SOCKET_PATH,
+				DBG_EVENTS_DB: EVENTS_DB_PATH,
+			},
 		});
 		return { stdout, stderr: "", exitCode: 0 };
 	} catch (e: unknown) {
@@ -53,7 +57,11 @@ function killDaemon(): void {
 				execFileSync(process.execPath, [CLI, "close"], {
 					encoding: "utf8",
 					timeout: 5000,
-					env: { ...process.env, DBG_EVENTS_DB: EVENTS_DB_PATH },
+					env: {
+						...process.env,
+						DBG_SOCK: SOCKET_PATH,
+						DBG_EVENTS_DB: EVENTS_DB_PATH,
+					},
 				});
 			} catch {
 				/* ignore */

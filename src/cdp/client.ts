@@ -80,16 +80,19 @@ export class CdpClientWrapper implements CdpExecutor {
 	private consoleId = 0;
 	private exceptionId = 0;
 	private asyncFrameId = 0;
+	private pageEventId = 0;
+	private wsFrameId = 0;
 	private sessionId: string | null = null;
+	private mockRules: Map<string, { body: string; status: number }> = new Map();
 
 	constructor(state: DaemonState, store?: EventStore | null) {
 		this.state = state;
 		this.store = store ?? null;
 	}
 
-	async connect(wsUrl: string): Promise<void> {
+	async connect(wsUrl: string, targetType?: "node" | "page"): Promise<void> {
 		this.sessionId = createSessionId();
-		this.recordConnection("connect.start", { wsUrl }, true);
+		this.recordConnection("connect.start", { wsUrl, targetType }, true);
 
 		try {
 			const CDP = (await import("chrome-remote-interface")).default;
@@ -105,6 +108,25 @@ export class CdpClientWrapper implements CdpExecutor {
 			// don't implement all domains and will hang on enable().
 			await this.enableDomain("Debugger");
 			await this.enableDomain("Runtime");
+
+			// Enable browser-specific domains for page targets
+			if (targetType === "page") {
+				const browserDomains = [
+					"Network",
+					"Page",
+					"DOM",
+					"CSS",
+					"Log",
+					"Performance",
+					"DOMStorage",
+					"Fetch",
+					"Input",
+				];
+				for (const domain of browserDomains) {
+					await this.enableDomain(domain);
+				}
+			}
+
 			this.state.connected = true;
 
 			// If target was started with --inspect-brk, it's waiting for a debugger.
@@ -114,7 +136,7 @@ export class CdpClientWrapper implements CdpExecutor {
 
 			// Give the paused event a moment to arrive
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			this.recordConnection("connect.success", { wsUrl }, true);
+			this.recordConnection("connect.success", { wsUrl, targetType }, true);
 		} catch (error) {
 			this.recordConnection(
 				"connect.error",
@@ -292,13 +314,223 @@ export class CdpClientWrapper implements CdpExecutor {
 				uncaught: true,
 			});
 		});
+
+		// ─── Browser event handlers (page targets) ───
+
+		client.on("Network.requestWillBeSent", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				request: {
+					url: string;
+					method: string;
+					headers: Record<string, string>;
+				};
+				timestamp: number;
+				initiator: { type: string; url?: string };
+				type?: string;
+			};
+			this.state.networkRequests.set(p.requestId, {
+				id: p.requestId,
+				url: p.request.url,
+				method: p.request.method,
+				status: 0,
+				type: p.type ?? "",
+				mimeType: "",
+				startTime: p.timestamp,
+				endTime: 0,
+				duration: 0,
+				size: 0,
+				error: "",
+				requestHeaders: JSON.stringify(p.request.headers),
+				responseHeaders: "",
+				initiator: p.initiator.type,
+			});
+			if (this.state.networkRequests.size > 10000) {
+				const firstKey = this.state.networkRequests.keys().next().value;
+				if (firstKey !== undefined) this.state.networkRequests.delete(firstKey);
+			}
+		});
+
+		client.on("Network.responseReceived", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				response: {
+					status: number;
+					headers: Record<string, string>;
+					mimeType: string;
+				};
+				type?: string;
+			};
+			const entry = this.state.networkRequests.get(p.requestId);
+			if (entry) {
+				entry.status = p.response.status;
+				entry.mimeType = p.response.mimeType;
+				entry.responseHeaders = JSON.stringify(p.response.headers);
+				if (p.type) entry.type = p.type;
+			}
+		});
+
+		client.on("Network.loadingFinished", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				timestamp: number;
+				encodedDataLength: number;
+			};
+			const entry = this.state.networkRequests.get(p.requestId);
+			if (entry) {
+				entry.endTime = p.timestamp;
+				entry.size = p.encodedDataLength;
+				entry.duration = (entry.endTime - entry.startTime) * 1000;
+			}
+		});
+
+		client.on("Network.loadingFailed", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				errorText: string;
+			};
+			const entry = this.state.networkRequests.get(p.requestId);
+			if (entry) {
+				entry.error = p.errorText;
+			}
+		});
+
+		client.on("Network.webSocketFrameReceived", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				timestamp: number;
+				response: { opcode: number; payloadData: string };
+			};
+			this.state.wsFrames.push({
+				id: ++this.wsFrameId,
+				requestId: p.requestId,
+				opcode: p.response.opcode,
+				data: p.response.payloadData,
+				ts: p.timestamp,
+				direction: "received",
+			});
+			if (this.state.wsFrames.length > 5000) {
+				this.state.wsFrames.shift();
+			}
+		});
+
+		client.on("Network.webSocketFrameSent", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				timestamp: number;
+				response: { opcode: number; payloadData: string };
+			};
+			this.state.wsFrames.push({
+				id: ++this.wsFrameId,
+				requestId: p.requestId,
+				opcode: p.response.opcode,
+				data: p.response.payloadData,
+				ts: p.timestamp,
+				direction: "sent",
+			});
+			if (this.state.wsFrames.length > 5000) {
+				this.state.wsFrames.shift();
+			}
+		});
+
+		client.on("Page.lifecycleEvent", (params: unknown) => {
+			const p = params as {
+				name: string;
+				timestamp: number;
+				frameId: string;
+			};
+			this.state.pageEvents.push({
+				id: ++this.pageEventId,
+				name: p.name,
+				ts: p.timestamp,
+				frameId: p.frameId,
+				url: "",
+			});
+			if (this.state.pageEvents.length > 5000) {
+				this.state.pageEvents.shift();
+			}
+		});
+
+		client.on("Page.frameNavigated", (params: unknown) => {
+			const p = params as {
+				frame: { id: string; url: string };
+			};
+			this.state.pageEvents.push({
+				id: ++this.pageEventId,
+				name: "frameNavigated",
+				ts: Date.now(),
+				frameId: p.frame.id,
+				url: p.frame.url,
+			});
+			if (this.state.pageEvents.length > 5000) {
+				this.state.pageEvents.shift();
+			}
+		});
+
+		client.on("Log.entryAdded", (params: unknown) => {
+			const p = params as {
+				entry: {
+					level: string;
+					text: string;
+					timestamp: number;
+					url?: string;
+					stackTrace?: {
+						callFrames: Array<{ url: string; lineNumber: number }>;
+					};
+				};
+			};
+			const stack =
+				p.entry.stackTrace?.callFrames
+					?.map((f) => `${f.url}:${f.lineNumber}`)
+					.join("\n") ?? "";
+			this.state.console.push({
+				id: ++this.consoleId,
+				type: p.entry.level,
+				text: p.entry.text,
+				ts: p.entry.timestamp,
+				stack,
+			});
+		});
+
+		client.on("Fetch.requestPaused", (params: unknown) => {
+			const p = params as {
+				requestId: string;
+				request: { url: string; method: string };
+			};
+
+			// Check mock rules
+			for (const [pattern, rule] of this.mockRules) {
+				if (p.request.url.includes(pattern)) {
+					// Fulfill with mock response
+					const headers = [
+						{ name: "Content-Type", value: "application/json" },
+						{ name: "Access-Control-Allow-Origin", value: "*" },
+					];
+					this.trySend("Fetch.fulfillRequest", {
+						requestId: p.requestId,
+						responseCode: rule.status,
+						responseHeaders: headers,
+						body: Buffer.from(rule.body).toString("base64"),
+					});
+					return;
+				}
+			}
+
+			// No mock match — continue request normally
+			this.trySend("Fetch.continueRequest", {
+				requestId: p.requestId,
+			});
+		});
 	}
 
 	private interceptClientEmit(client: CdpClient): void {
 		const originalEmit = client.emit.bind(client);
 		client.emit = ((eventName: string | symbol, ...args: unknown[]) => {
 			if (typeof eventName === "string" && eventName.includes(".")) {
-				this.recordCdp("cdp_recv", eventName, { event: args[0] });
+				const normalizedMethod = normalizeIncomingEventMethod(eventName);
+				if (normalizedMethod) {
+					this.recordCdp("cdp_recv", normalizedMethod, { event: args[0] });
+				}
 			}
 			return originalEmit(eventName, ...args);
 		}) as typeof client.emit;
@@ -350,6 +582,22 @@ export class CdpClientWrapper implements CdpExecutor {
 		return this.client;
 	}
 
+	addMockRule(urlPattern: string, body: string, status: number): void {
+		this.mockRules.set(urlPattern, { body, status });
+	}
+
+	removeMockRule(urlPattern: string): boolean {
+		return this.mockRules.delete(urlPattern);
+	}
+
+	clearMockRules(): void {
+		this.mockRules.clear();
+	}
+
+	getMockRules(): Map<string, { body: string; status: number }> {
+		return this.mockRules;
+	}
+
 	/** Wait for the next Debugger.paused event, with a timeout. */
 	waitForPaused(timeoutMs = 30000): Promise<void> {
 		return new Promise((resolve, reject) => {
@@ -386,6 +634,9 @@ export class CdpClientWrapper implements CdpExecutor {
 		this.state.paused = false;
 		this.state.callFrames = [];
 		this.state.asyncStackTrace = [];
+		this.state.networkRequests.clear();
+		this.state.pageEvents = [];
+		this.state.wsFrames = [];
 		this.sessionId = null;
 	}
 
@@ -503,6 +754,16 @@ function extractFilename(url: string): string {
 function toErrorMessage(error: unknown): string {
 	if (error instanceof Error) return error.message;
 	return String(error);
+}
+
+function normalizeIncomingEventMethod(method: string): string | null {
+	// chrome-remote-interface can emit duplicate CDP events with a trailing
+	// ".undefined" suffix. The unsuffixed event is emitted as well, so skip the
+	// suffixed duplicate to keep event logs canonical.
+	if (method.endsWith(".undefined")) {
+		return null;
+	}
+	return method;
 }
 
 function createSessionId(): string {

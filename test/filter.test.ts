@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { filterRows, limitRows, orderRows } from "../src/query/filter.js";
+import {
+	filterRows,
+	limitRows,
+	orderRows,
+} from "../packages/query/src/filter.js";
 
 describe("filter", () => {
 	const columns = ["name", "type", "value"];
