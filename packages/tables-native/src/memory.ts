@@ -1,11 +1,12 @@
 import type { VirtualTable } from "@dbg/query";
-import { extractFilterValue } from "./utils.js";
+import { assertDapQueryable, extractFilterValue } from "./utils.js";
 
 export const memoryTable: VirtualTable = {
 	name: "memory",
 	columns: ["address", "offset", "hex", "ascii"],
 	requiredFilters: ["address", "length"],
 	async fetch(where, executor) {
+		assertDapQueryable(executor.getState());
 		const address = String(extractFilterValue(where, "address") ?? "");
 		const length = Number(extractFilterValue(where, "length") ?? 0);
 		if (!address || !Number.isFinite(length) || length <= 0) {

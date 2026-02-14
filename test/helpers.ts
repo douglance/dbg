@@ -27,6 +27,10 @@ export function createState(overrides: StateOverrides = {}): DaemonState {
 		registers: [],
 		modules: [],
 		targetTriple: "",
+		phase: "terminated",
+		lastStop: null,
+		lastError: null,
+		stopEpoch: 0,
 	};
 
 	return {

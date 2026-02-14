@@ -1,5 +1,12 @@
 export declare const SOCKET_PATH: string;
 export type SessionProtocol = "cdp" | "dap";
+export type DapSessionPhase =
+	| "starting"
+	| "configuring"
+	| "paused"
+	| "running"
+	| "terminated"
+	| "error";
 export interface SessionCapabilities {
 	breakpoints: boolean;
 	stepping: boolean;
@@ -21,6 +28,17 @@ export interface SessionCapabilities {
 }
 export interface EventStoreLike {
 	query(sql: string, params?: unknown[]): Record<string, unknown>[];
+	record?: (
+		event: {
+			ts?: number;
+			source: string;
+			category: string;
+			method: string;
+			data?: unknown;
+			sessionId?: string | null;
+		},
+		flushNow?: boolean,
+	) => void;
 }
 export interface DebugExecutor {
 	send(method: string, params?: Record<string, unknown>): Promise<unknown>;
@@ -35,6 +53,10 @@ export type Command = {
 } & (
 	| {
 			cmd: "open";
+			args: string;
+	  }
+	| {
+			cmd: "attach";
 			args: string;
 	  }
 	| {
@@ -168,6 +190,7 @@ export type Command = {
 export interface OkResponse {
 	ok: true;
 	status?: "paused" | "running";
+	phase?: DapSessionPhase;
 	file?: string;
 	line?: number;
 	function?: string;
@@ -183,10 +206,16 @@ export interface OkResponse {
 	data?: string;
 	s?: string;
 	sessions?: SessionInfo[];
+	lastErrorCode?: string;
+	lastErrorMessage?: string;
+	lastStopReason?: string;
+	lastStopThreadId?: number;
 }
 export interface ErrResponse {
 	ok: false;
 	error: string;
+	errorCode?: string;
+	phase?: DapSessionPhase;
 }
 export type Response = OkResponse | ErrResponse;
 export interface StoredBreakpoint {
@@ -319,6 +348,16 @@ export interface ModuleInfo {
 	baseAddress: string;
 	size: number;
 }
+export interface DapStopInfo {
+	reason: string;
+	threadId: number | null;
+	timestamp: number;
+}
+export interface DapErrorInfo {
+	code: string;
+	message: string;
+	timestamp: number;
+}
 export interface CdpState {
 	lastWsUrl: string | null;
 	networkRequests: Map<string, NetworkRequest>;
@@ -332,6 +371,10 @@ export interface DapState {
 	registers: RegisterGroup[];
 	modules: ModuleInfo[];
 	targetTriple: string;
+	phase: DapSessionPhase;
+	lastStop: DapStopInfo | null;
+	lastError: DapErrorInfo | null;
+	stopEpoch: number;
 }
 export interface DebuggerState {
 	connected: boolean;

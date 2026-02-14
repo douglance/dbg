@@ -57,6 +57,17 @@ export function createEmptyDebuggerState() {
 			wsFrames: [],
 			coverageSnapshot: null,
 		},
+		dap: {
+			threadId: null,
+			activeThreads: [],
+			registers: [],
+			modules: [],
+			targetTriple: "",
+			phase: "terminated",
+			lastStop: null,
+			lastError: null,
+			stopEpoch: 0,
+		},
 	};
 }
 //# sourceMappingURL=index.js.map

@@ -4,29 +4,49 @@
 import type { EventStore } from "@dbg/store";
 import type {
 	DaemonState,
+	DapSessionPhase,
 	DebugExecutor,
 	Response,
 	StoredBreakpoint,
 } from "@dbg/types";
 
 interface FlowExecutor extends DebugExecutor {
-	waitForPaused?: (timeoutMs?: number) => Promise<void>;
+	waitForPaused?: (timeoutMs?: number, minStopEpoch?: number) => Promise<void>;
 	connect?: (target: string, targetType?: "node" | "page") => Promise<void>;
 	disconnect?: () => Promise<void>;
+	getPhase?: () => DapSessionPhase;
+	getLastError?: () => { code: string; message: string } | null;
+	getPauseEpoch?: () => number;
 }
 
 // ─── Flow commands ───
 
 export async function handleStatus(
-	_executor: FlowExecutor,
+	executor: FlowExecutor,
 	state: DaemonState,
 ): Promise<Response> {
+	const phase = resolveDapPhase(executor, state);
+	const lastError = resolveLastError(executor, state);
+	const lastStop = state.dap?.lastStop ?? null;
 	if (!state.connected) {
 		return {
 			ok: true,
 			connected: false,
 			status: undefined,
 			pid: state.pid ?? undefined,
+			...(phase ? { phase } : {}),
+			...(lastError
+				? {
+						lastErrorCode: lastError.code,
+						lastErrorMessage: lastError.message,
+					}
+				: {}),
+			...(lastStop
+				? {
+						lastStopReason: lastStop.reason,
+						lastStopThreadId: lastStop.threadId ?? undefined,
+					}
+				: {}),
 		};
 	}
 	const frame = state.callFrames[0];
@@ -38,6 +58,19 @@ export async function handleStatus(
 		line: frame?.line,
 		function: frame?.functionName,
 		pid: state.pid ?? undefined,
+		...(phase ? { phase } : {}),
+		...(lastError
+			? {
+					lastErrorCode: lastError.code,
+					lastErrorMessage: lastError.message,
+				}
+			: {}),
+		...(lastStop
+			? {
+					lastStopReason: lastStop.reason,
+					lastStopThreadId: lastStop.threadId ?? undefined,
+				}
+			: {}),
 	};
 }
 
@@ -58,6 +91,10 @@ export async function handleTrace(
 			CASE
 				WHEN source = 'cdp_send' THEN 'send'
 				WHEN source = 'cdp_recv' THEN 'recv'
+				WHEN source = 'dap_send' THEN 'send'
+				WHEN source = 'dap_recv' THEN 'recv'
+				WHEN source = 'dap_event' THEN 'event'
+				WHEN source = 'dap_lifecycle' THEN 'lifecycle'
 				ELSE source
 			END AS direction,
 			method,
@@ -65,7 +102,7 @@ export async function handleTrace(
 			json_extract(data, '$.error') AS error,
 			data
 		FROM events
-		WHERE category = 'cdp'
+		WHERE category IN ('cdp', 'dap')
 		ORDER BY id DESC
 		LIMIT ?
 	`,
@@ -199,14 +236,24 @@ export async function handleContinue(
 	executor: FlowExecutor,
 	state: DaemonState,
 ): Promise<Response> {
+	const terminalError = checkTerminalDapState(executor, state);
+	if (terminalError) return terminalError;
 	if (!state.connected) return { ok: false, error: "not connected" };
 	if (!state.paused) return { ok: false, error: "not paused" };
 	if (!executor.waitForPaused) {
 		return { ok: false, error: "session does not support stepping" };
 	}
 
-	const waitP = executor.waitForPaused();
-	await executor.send("Debugger.resume");
+	const waitP = executor.waitForPaused(30000, nextStopEpoch(executor));
+	try {
+		await executor.send("Debugger.resume");
+	} catch (error) {
+		return flowFailure(
+			`continue failed: ${(error as Error).message}`,
+			errorCode(error, "DAP_CONTINUE_FAILED"),
+			resolveDapPhase(executor, state),
+		);
+	}
 
 	// Wait for next pause. If the program finishes, the promise will time out.
 	// We use a short timeout here and return "running" if it doesn't pause.
@@ -214,11 +261,24 @@ export async function handleContinue(
 		await Promise.race([
 			waitP,
 			new Promise<void>((_, reject) =>
-				setTimeout(() => reject(new Error("running")), 5000),
+				setTimeout(() => reject(new Error("__running__")), 5000),
 			),
 		]);
-	} catch {
-		return { ok: true, status: "running" };
+	} catch (error) {
+		if (error instanceof Error && error.message === "__running__") {
+			const postTerminalError = checkTerminalDapState(executor, state);
+			if (postTerminalError) return postTerminalError;
+			return {
+				ok: true,
+				status: "running",
+				phase: resolveDapPhase(executor, state),
+			};
+		}
+		return flowFailure(
+			`continue failed: ${(error as Error).message}`,
+			errorCode(error, "DAP_CONTINUE_FAILED"),
+			resolveDapPhase(executor, state),
+		);
 	}
 
 	const frame = state.callFrames[0];
@@ -228,6 +288,7 @@ export async function handleContinue(
 		file: frame?.file,
 		line: frame?.line,
 		function: frame?.functionName,
+		phase: resolveDapPhase(executor, state),
 	};
 }
 
@@ -257,15 +318,25 @@ async function stepCommand(
 	state: DaemonState,
 	method: string,
 ): Promise<Response> {
+	const terminalError = checkTerminalDapState(executor, state);
+	if (terminalError) return terminalError;
 	if (!state.connected) return { ok: false, error: "not connected" };
 	if (!state.paused) return { ok: false, error: "not paused" };
 	if (!executor.waitForPaused) {
 		return { ok: false, error: "session does not support stepping" };
 	}
 
-	const waitP = executor.waitForPaused();
-	await executor.send(method);
-	await waitP;
+	const waitP = executor.waitForPaused(30000, nextStopEpoch(executor));
+	try {
+		await executor.send(method);
+		await waitP;
+	} catch (error) {
+		return flowFailure(
+			`step failed: ${(error as Error).message}`,
+			errorCode(error, "DAP_STEP_FAILED"),
+			resolveDapPhase(executor, state),
+		);
+	}
 
 	const frame = state.callFrames[0];
 	return {
@@ -274,6 +345,7 @@ async function stepCommand(
 		file: frame?.file,
 		line: frame?.line,
 		function: frame?.functionName,
+		phase: resolveDapPhase(executor, state),
 	};
 }
 
@@ -281,15 +353,25 @@ export async function handlePause(
 	executor: FlowExecutor,
 	state: DaemonState,
 ): Promise<Response> {
+	const terminalError = checkTerminalDapState(executor, state);
+	if (terminalError) return terminalError;
 	if (!state.connected) return { ok: false, error: "not connected" };
 	if (state.paused) return { ok: false, error: "already paused" };
 	if (!executor.waitForPaused) {
 		return { ok: false, error: "session does not support pause" };
 	}
 
-	const waitP = executor.waitForPaused();
-	await executor.send("Debugger.pause");
-	await waitP;
+	const waitP = executor.waitForPaused(30000, nextStopEpoch(executor));
+	try {
+		await executor.send("Debugger.pause");
+		await waitP;
+	} catch (error) {
+		return flowFailure(
+			`pause failed: ${(error as Error).message}`,
+			errorCode(error, "DAP_PAUSE_FAILED"),
+			resolveDapPhase(executor, state),
+		);
+	}
 
 	const frame = state.callFrames[0];
 	return {
@@ -298,6 +380,7 @@ export async function handlePause(
 		file: frame?.file,
 		line: frame?.line,
 		function: frame?.functionName,
+		phase: resolveDapPhase(executor, state),
 	};
 }
 
@@ -586,6 +669,69 @@ function parseTraceLimit(args?: string): number {
 	const parsed = Number.parseInt(trimmed, 10);
 	if (Number.isNaN(parsed)) return -1;
 	return Math.min(parsed, 1000);
+}
+
+function nextStopEpoch(executor: FlowExecutor): number | undefined {
+	if (!executor.getPauseEpoch) return undefined;
+	return executor.getPauseEpoch() + 1;
+}
+
+function resolveDapPhase(
+	executor: FlowExecutor,
+	state: DaemonState,
+): DapSessionPhase | undefined {
+	if (executor.protocol !== "dap") return undefined;
+	return executor.getPhase?.() ?? state.dap?.phase;
+}
+
+function resolveLastError(
+	executor: FlowExecutor,
+	state: DaemonState,
+): { code: string; message: string } | null {
+	if (executor.protocol !== "dap") return null;
+	return executor.getLastError?.() ?? state.dap?.lastError ?? null;
+}
+
+function checkTerminalDapState(
+	executor: FlowExecutor,
+	state: DaemonState,
+): Response | null {
+	const phase = resolveDapPhase(executor, state);
+	if (phase !== "terminated" && phase !== "error") {
+		return null;
+	}
+	const lastError = resolveLastError(executor, state);
+	if (phase === "error" && lastError) {
+		return flowFailure(lastError.message, lastError.code, phase);
+	}
+	return flowFailure(
+		"dap session is terminated",
+		"DAP_SESSION_TERMINATED",
+		phase,
+	);
+}
+
+function flowFailure(
+	error: string,
+	errorCodeValue: string,
+	phase?: DapSessionPhase,
+): Response {
+	return {
+		ok: false,
+		error,
+		errorCode: errorCodeValue,
+		phase,
+	};
+}
+
+function errorCode(error: unknown, fallback: string): string {
+	if (error && typeof error === "object" && "code" in error) {
+		const value = (error as { code?: unknown }).code;
+		if (typeof value === "string" && value) {
+			return value;
+		}
+	}
+	return fallback;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {

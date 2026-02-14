@@ -1,4 +1,7 @@
-import { DapClientWrapper, type LldbAttachToPidOptions } from "@dbg/adapter-dap";
+import {
+	DapClientWrapper,
+	type LldbAttachToPidOptions,
+} from "@dbg/adapter-dap";
 import { DAP_CAPABILITIES } from "@dbg/types";
 import type {
 	DebuggerState,

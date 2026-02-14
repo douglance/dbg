@@ -8,7 +8,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm -r --filter \"./packages/*\" run build",
+    "build": "pnpm -r --filter \"./packages/*\" --filter \"!@douglance/dbg\" run build",
+    "build:release": "pnpm run build && pnpm --filter @douglance/dbg run build",
+    "pack:release": "pnpm run build:release && (cd packages/npm && npm pack --silent)",
     "prepublishOnly": "pnpm run build",
     "test": "pnpm run build && vitest run",
     "test:watch": "vitest",
@@ -24,6 +26,7 @@
     "@types/node": "^22.13.1",
     "@vscode/debugprotocol": "^1.68.0",
     "devtools-protocol": "^0.0.1581282",
+    "esbuild": "^0.25.0",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   }
