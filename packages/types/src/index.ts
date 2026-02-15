@@ -3,6 +3,67 @@
 export const SOCKET_PATH = process.env.DBG_SOCK ?? "/tmp/dbg.sock";
 
 export type SessionProtocol = "cdp" | "dap";
+export type AttachProvider = "apple-device";
+export type AttachPlatform = "auto" | "ios" | "tvos" | "watchos" | "visionos";
+export type AttachStrategy = "auto" | "device-process" | "gdb-remote";
+export type DapSessionPhase =
+	| "starting"
+	| "configuring"
+	| "paused"
+	| "running"
+	| "terminated"
+	| "error";
+
+export interface AttachRequest {
+	provider: AttachProvider;
+	platform: AttachPlatform;
+	bundleId: string;
+	device?: string;
+	pid?: number;
+	launch?: boolean;
+	protocol?: SessionProtocol;
+	attachStrategy?: AttachStrategy;
+	attachTimeoutMs?: number;
+	verbose?: boolean;
+}
+
+export interface ProviderResolutionResult {
+	provider: AttachProvider;
+	platform: AttachPlatform;
+	deviceId: string;
+	bundleId: string;
+	pid: number;
+	attachProtocol: "dap";
+	metadata?: Record<string, unknown>;
+}
+
+export type ProviderErrorCode =
+	| "invalid_request"
+	| "device_not_found"
+	| "app_not_installed"
+	| "process_not_running"
+	| "attach_denied_or_timeout"
+	| "lldb_dap_unavailable"
+	| "provider_error";
+
+export interface ProviderError {
+	code: ProviderErrorCode;
+	message: string;
+	details?: Record<string, unknown>;
+}
+
+export interface AttachDiagnostics {
+	requestedStrategy: AttachStrategy;
+	attemptedStrategies: Array<{
+		strategy: AttachStrategy;
+		durationMs: number;
+		success: boolean;
+		error?: string;
+	}>;
+	selectedStrategy: AttachStrategy | null;
+	providerResolveMs: number;
+	totalMs: number;
+}
 
 export interface SessionCapabilities {
 	// Universal
@@ -29,6 +90,17 @@ export interface SessionCapabilities {
 
 export interface EventStoreLike {
 	query(sql: string, params?: unknown[]): Record<string, unknown>[];
+	record?: (
+		event: {
+			ts?: number;
+			source: string;
+			category: string;
+			method: string;
+			data?: unknown;
+			sessionId?: string | null;
+		},
+		flushNow?: boolean,
+	) => void;
 }
 
 export interface DebugExecutor {
@@ -45,7 +117,9 @@ export type CdpExecutor = DebugExecutor;
 // CLI <-> Daemon wire protocol
 export type Command = { s?: string } & (
 	| { cmd: "open"; args: string }
+	| { cmd: "attach"; args: string }
 	| { cmd: "attach-lldb"; args: string }
+	| { cmd: "devices"; args?: string }
 	| { cmd: "close" }
 	| { cmd: "run"; args: string }
 	| { cmd: "restart" }
@@ -85,6 +159,7 @@ export type Command = { s?: string } & (
 export interface OkResponse {
 	ok: true;
 	status?: "paused" | "running";
+	phase?: DapSessionPhase;
 	file?: string;
 	line?: number;
 	function?: string;
@@ -100,11 +175,17 @@ export interface OkResponse {
 	data?: string;
 	s?: string;
 	sessions?: SessionInfo[];
+	lastErrorCode?: string;
+	lastErrorMessage?: string;
+	lastStopReason?: string;
+	lastStopThreadId?: number;
 }
 
 export interface ErrResponse {
 	ok: false;
 	error: string;
+	errorCode?: string;
+	phase?: DapSessionPhase;
 }
 
 export type Response = OkResponse | ErrResponse;
@@ -257,6 +338,18 @@ export interface ModuleInfo {
 	size: number;
 }
 
+export interface DapStopInfo {
+	reason: string;
+	threadId: number | null;
+	timestamp: number;
+}
+
+export interface DapErrorInfo {
+	code: string;
+	message: string;
+	timestamp: number;
+}
+
 export interface CdpState {
 	lastWsUrl: string | null;
 	networkRequests: Map<string, NetworkRequest>;
@@ -271,6 +364,10 @@ export interface DapState {
 	registers: RegisterGroup[];
 	modules: ModuleInfo[];
 	targetTriple: string;
+	phase: DapSessionPhase;
+	lastStop: DapStopInfo | null;
+	lastError: DapErrorInfo | null;
+	stopEpoch: number;
 }
 
 export interface DebuggerState {
@@ -375,6 +472,17 @@ export function createEmptyDebuggerState(): DebuggerState {
 			pageEvents: [],
 			wsFrames: [],
 			coverageSnapshot: null,
+		},
+		dap: {
+			threadId: null,
+			activeThreads: [],
+			registers: [],
+			modules: [],
+			targetTriple: "",
+			phase: "terminated",
+			lastStop: null,
+			lastError: null,
+			stopEpoch: 0,
 		},
 	};
 }

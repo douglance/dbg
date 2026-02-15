@@ -1,11 +1,12 @@
 import type { VirtualTable } from "@dbg/query";
-import { extractFilterValue } from "./utils.js";
+import { assertDapQueryable, extractFilterValue } from "./utils.js";
 
 export const disassemblyTable: VirtualTable = {
 	name: "disassembly",
 	columns: ["address", "instruction", "symbol", "location"],
 	requiredFilters: ["address"],
 	async fetch(where, executor) {
+		assertDapQueryable(executor.getState());
 		const address = String(extractFilterValue(where, "address") ?? "");
 		const count = Number(extractFilterValue(where, "count") ?? 32);
 		if (!address) {

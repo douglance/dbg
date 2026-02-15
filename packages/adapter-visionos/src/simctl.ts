@@ -33,7 +33,12 @@ export function resolveVisionOsProcess(
 		return { bundleId, device, pid, launched: false };
 	}
 
-	const launchOutput = runSimctl(["launch", device, bundleId, ...(options.launchArgs ?? [])]);
+	const launchOutput = runSimctl([
+		"launch",
+		device,
+		bundleId,
+		...(options.launchArgs ?? []),
+	]);
 	const launchPid = parseLaunchPid(launchOutput);
 	if (launchPid !== null) {
 		return { bundleId, device, pid: launchPid, launched: true };
@@ -114,7 +119,9 @@ function runSimctl(args: string[]): string {
 				: err.stderr
 					? err.stderr.toString("utf8")
 					: "";
-		const detail = collapseWhitespace(stderrText || err.message || "unknown error");
+		const detail = collapseWhitespace(
+			stderrText || err.message || "unknown error",
+		);
 		throw new Error(`simctl ${args.join(" ")} failed: ${detail}`);
 	}
 }

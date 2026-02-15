@@ -9,6 +9,9 @@
       "@dbg/query": ["packages/query/src/index.ts"],
       "@dbg/adapter-cdp": ["packages/adapter-cdp/src/index.ts"],
       "@dbg/adapter-dap": ["packages/adapter-dap/src/index.ts"],
+      "@dbg/provider-apple-device": [
+        "packages/provider-apple-device/src/index.ts"
+      ],
       "@dbg/tables-core": ["packages/tables-core/src/index.ts"],
       "@dbg/tables-browser": ["packages/tables-browser/src/index.ts"],
       "@dbg/tables-native": ["packages/tables-native/src/index.ts"],

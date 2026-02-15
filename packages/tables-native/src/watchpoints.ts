@@ -1,9 +1,11 @@
 import type { VirtualTable } from "@dbg/query";
+import { assertDapQueryable } from "./utils.js";
 
 export const watchpointsTable: VirtualTable = {
 	name: "watchpoints",
 	columns: ["id", "expression", "access", "enabled"],
 	async fetch(_where, executor) {
+		assertDapQueryable(executor.getState());
 		const response = (await executor.send("watchpoints")) as {
 			watchpoints?: Array<{
 				id: string | number;

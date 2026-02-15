@@ -1,0 +1,45 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://dbg.dev/schemas/ProviderResolutionResult.schema.json",
+	"title": "ProviderResolutionResult",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"provider",
+		"platform",
+		"deviceId",
+		"bundleId",
+		"pid",
+		"attachProtocol"
+	],
+	"properties": {
+		"provider": {
+			"type": "string",
+			"enum": ["apple-device"]
+		},
+		"platform": {
+			"type": "string",
+			"enum": ["ios", "tvos", "watchos", "visionos"]
+		},
+		"deviceId": {
+			"type": "string",
+			"minLength": 1
+		},
+		"bundleId": {
+			"type": "string",
+			"minLength": 1
+		},
+		"pid": {
+			"type": "integer",
+			"minimum": 1
+		},
+		"attachProtocol": {
+			"type": "string",
+			"enum": ["dap"]
+		},
+		"metadata": {
+			"type": "object",
+			"additionalProperties": true
+		}
+	}
+}

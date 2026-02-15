@@ -1,0 +1,30 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://dbg.dev/schemas/ProviderError.schema.json",
+	"title": "ProviderError",
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["code", "message"],
+	"properties": {
+		"code": {
+			"type": "string",
+			"enum": [
+				"invalid_request",
+				"device_not_found",
+				"app_not_installed",
+				"process_not_running",
+				"attach_denied_or_timeout",
+				"lldb_dap_unavailable",
+				"provider_error"
+			]
+		},
+		"message": {
+			"type": "string",
+			"minLength": 1
+		},
+		"details": {
+			"type": "object",
+			"additionalProperties": true
+		}
+	}
+}

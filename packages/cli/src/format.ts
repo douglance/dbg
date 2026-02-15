@@ -82,17 +82,23 @@ export function formatStatus(
 	fn?: string,
 	pid?: number | null,
 	session?: string,
+	phase?: string,
+	lastErrorCode?: string,
 ): string {
 	const parts: string[] = [];
 	if (session) parts.push(`[${session}]`);
 	parts.push(connected ? "connected" : "disconnected");
 	if (connected) {
 		parts.push(paused ? "paused" : "running");
+		if (phase && phase !== (paused ? "paused" : "running")) {
+			parts.push(`phase=${phase}`);
+		}
 		if (paused && file) {
 			parts.push(`${file}:${line}`);
 			if (fn) parts.push(fn);
 		}
 	}
 	if (pid) parts.push(`pid=${pid}`);
+	if (lastErrorCode) parts.push(`last_error=${lastErrorCode}`);
 	return parts.join("\t");
 }

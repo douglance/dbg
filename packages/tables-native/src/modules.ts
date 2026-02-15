@@ -1,10 +1,12 @@
 import type { VirtualTable } from "@dbg/query";
+import { assertDapQueryable } from "./utils.js";
 
 export const modulesTable: VirtualTable = {
 	name: "modules",
 	columns: ["id", "name", "path", "base_address", "size"],
 	async fetch(_where, executor) {
 		const state = executor.getState();
+		assertDapQueryable(state);
 		if (state.dap?.modules?.length) {
 			return {
 				columns: this.columns,

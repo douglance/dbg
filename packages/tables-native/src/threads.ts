@@ -1,10 +1,12 @@
 import type { VirtualTable } from "@dbg/query";
+import { assertDapQueryable } from "./utils.js";
 
 export const threadsTable: VirtualTable = {
 	name: "threads",
 	columns: ["id", "name"],
 	async fetch(_where, executor) {
 		const state = executor.getState();
+		assertDapQueryable(state);
 		if (state.dap?.activeThreads?.length) {
 			return {
 				columns: this.columns,

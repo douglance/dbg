@@ -13,6 +13,7 @@ import {
 	handleStepOut,
 	handleStepOver,
 } from "../packages/cli/src/commands.js";
+import { DAP_CAPABILITIES } from "../packages/types/src/index.js";
 import type {
 	DaemonState,
 	StoredBreakpoint,
@@ -109,6 +110,64 @@ describe("commands", () => {
 
 		await expect(pending).resolves.toEqual({ ok: true, status: "running" });
 		expect(cdp.send).toHaveBeenCalledWith("Debugger.resume");
+	});
+
+	it("fails fast when dap session is terminated", async () => {
+		state.connected = true;
+		state.paused = true;
+		if (state.dap) {
+			state.dap.phase = "terminated";
+		}
+		const dapExecutor = {
+			protocol: "dap" as const,
+			capabilities: DAP_CAPABILITIES,
+			send: vi.fn(async () => ({})),
+			waitForPaused: vi.fn(async () => {}),
+			getState: vi.fn(() => state),
+			getPhase: vi.fn(() => "terminated" as const),
+			getLastError: vi.fn(() => null),
+		} as unknown as Parameters<typeof handleContinue>[0];
+
+		const result = await handleContinue(dapExecutor, state);
+		expect(result).toEqual({
+			ok: false,
+			error: "dap session is terminated",
+			errorCode: "DAP_SESSION_TERMINATED",
+			phase: "terminated",
+		});
+	});
+
+	it("returns dap error details when phase is error", async () => {
+		state.connected = true;
+		state.paused = true;
+		if (state.dap) {
+			state.dap.phase = "error";
+			state.dap.lastError = {
+				code: "DAP_PROCESS_EXITED",
+				message: "dap process exited",
+				timestamp: Date.now(),
+			};
+		}
+		const dapExecutor = {
+			protocol: "dap" as const,
+			capabilities: DAP_CAPABILITIES,
+			send: vi.fn(async () => ({})),
+			waitForPaused: vi.fn(async () => {}),
+			getState: vi.fn(() => state),
+			getPhase: vi.fn(() => "error" as const),
+			getLastError: vi.fn(() => ({
+				code: "DAP_PROCESS_EXITED",
+				message: "dap process exited",
+			})),
+		} as unknown as Parameters<typeof handleStepOver>[0];
+
+		const result = await handleStepOver(dapExecutor, state);
+		expect(result).toEqual({
+			ok: false,
+			error: "dap process exited",
+			errorCode: "DAP_PROCESS_EXITED",
+			phase: "error",
+		});
 	});
 
 	it("returns paused location after continue pauses again", async () => {

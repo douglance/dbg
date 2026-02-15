@@ -11,57 +11,76 @@ Internal skill for developing dbg itself.
 ## Build & Test
 
 ```sh
-npm run build          # tsup bundler
-npm test               # vitest
-npm run ci             # full pipeline (lint + typecheck + build + test)
-npx biome check src/   # lint/format check
+pnpm run build         # build all packages (tsc per package)
+pnpm test              # build + vitest
+pnpm run ci            # full pipeline (lint + typecheck + build + test)
+pnpm run lint          # biome lint
+pnpm run format:check  # biome format check
 ```
 
 ## Architecture
 
+pnpm monorepo (`pnpm-workspace.yaml`). All packages under `packages/`.
+
 ```
-CLI (src/cli.ts)
-  → daemon (src/daemon.ts)
-    → CDP client (src/cdp/client.ts)
-      → Chrome DevTools Protocol target
+@dbg/cli          CLI entry point, daemon, commands
+  → @dbg/adapter-cdp   CDP websocket client + target discovery
+  → @dbg/adapter-dap   DAP (Debug Adapter Protocol) client + transport
+  → @dbg/query         SQL parser, filter engine, table registry
+  → @dbg/store         SQLite-backed event store
+  → @dbg/tables-core   Virtual tables: frames, vars, scripts, breakpoints, timeline, etc.
+  → @dbg/tables-browser  Browser tables: network, dom, cookies, storage, coverage, etc.
+  → @dbg/tables-native   Native debug tables: threads, registers, memory, disassembly, etc.
+  → @dbg/types         Shared types (Session, Command, Response, protocol)
 ```
 
-- **Protocol**: `src/protocol.ts` — message types between CLI and daemon
-- **Query engine**: `src/query/` — SQL parser, virtual tables, formatters
-- **Event store**: `src/store.ts` — SQLite-backed event log (CDP messages, connections, timeline)
-- **CDP discovery**: `src/cdp/discovery.ts` — target enumeration and websocket URL resolution
+### Request flow
+
+```
+CLI (packages/cli/src/cli.ts)
+  → Unix socket → daemon (packages/cli/src/daemon.ts)
+    → CDP client (packages/adapter-cdp/src/client.ts) → Chrome DevTools Protocol target
+    or → DAP client (packages/adapter-dap/src/client.ts) → Debug Adapter Protocol target
+```
 
 ## Key Files
 
-| File | Purpose |
-|---|---|
-| `src/cli.ts` | CLI entry point, argument parsing, daemon communication |
-| `src/daemon.ts` | Long-running process, holds CDP connection, handles protocol messages |
-| `src/cdp/client.ts` | CDP websocket client, method dispatch, event handling |
-| `src/cdp/discovery.ts` | Target discovery via `/json` endpoint |
-| `src/protocol.ts` | CLI↔daemon message types and socket protocol |
-| `src/query/` | SQL query engine — parser, planner, virtual table implementations |
-| `src/store.ts` | SQLite event store for CDP messages and connection events |
-| `src/commands.ts` | Command implementations (breakpoints, stepping, eval, etc.) |
+| Package | Key Files | Purpose |
+|---|---|---|
+| `@dbg/cli` | `src/cli.ts` | CLI entry, argv parsing, daemon communication |
+| | `src/daemon.ts` | Long-running process, session registry, protocol dispatch |
+| | `src/commands.ts` | Command implementations (breakpoints, stepping, eval) |
+| | `src/format.ts` | TSV/JSON output formatting |
+| | `src/process.ts` | Managed child process spawning |
+| `@dbg/adapter-cdp` | `src/client.ts` | CDP websocket client, method dispatch |
+| | `src/discovery.ts` | Target discovery via `/json` endpoint |
+| `@dbg/adapter-dap` | `src/client.ts` | DAP client |
+| | `src/transport.ts` | DAP stream transport |
+| | `src/launch.ts` | DAP launch/attach configuration |
+| `@dbg/query` | `src/parser.ts` | SQL parser |
+| | `src/engine.ts` | Query execution engine |
+| | `src/filter.ts` | WHERE clause evaluation |
+| | `src/registry.ts` | Virtual table registry |
+| `@dbg/store` | `src/index.ts` | SQLite event store (CDP messages, connections) |
+| `@dbg/types` | `src/index.ts` | Shared types: Session, Command, Response, SOCKET_PATH |
 
 ## Environment Variables
 
 | Variable | Default | Dev Notes |
 |---|---|---|
 | `DBG_SOCK` | `/tmp/dbg.sock` | Tests use `/tmp/dbg-test.sock` for isolation |
-| `DBG_EVENTS_DB` | `/tmp/dbg-events.db` | Tests use `/tmp/dbg-test-events.db` |
+| `DBG_EVENTS_DB` | `/tmp/dbg-events.db` | Tests use per-test temp paths |
 
 ## Test Isolation
 
 Tests use isolated socket and database paths to avoid interfering with production daemons:
 
-```sh
-# Test helpers automatically set these:
-DBG_SOCK=/tmp/dbg-test.sock
-DBG_EVENTS_DB=/tmp/dbg-test-events.db
-```
-
-All test helpers in `test/helpers.ts` pass `DBG_SOCK` and `DBG_EVENTS_DB` via env to spawned processes. Never rely on the default paths in tests.
+- Integration tests set `SOCKET_PATH = "/tmp/dbg-test.sock"` and pass `DBG_SOCK` in all env objects
+- Each test file uses its own `DBG_EVENTS_DB` path and cleans up after each test
+- Never rely on default socket paths in tests
+- `fileParallelism: false` in vitest config — tests share sockets and can't run in parallel
+- Test fixtures in `test/fixtures/*.js` must preserve exact whitespace (line-number-dependent tests)
+- Don't run biome on `test/fixtures/*.js` — it would break line numbers
 
 ## Self-Debugging
 
@@ -72,7 +91,7 @@ dbg can debug its own daemon by running a second instance on a different socket.
 ```sh
 # Terminal 1: Start the daemon you want to debug
 DBG_SOCK=/tmp/dbg2.sock DBG_EVENTS_DB=/tmp/dbg2-events.db \
-  node --inspect-brk=9230 dist/daemon.js
+  node --inspect-brk=9230 packages/cli/dist/daemon.js
 
 # Terminal 2: Use normal dbg to attach to it
 dbg open 9230
@@ -84,44 +103,48 @@ dbg q "SELECT * FROM frames"  # see its call stack
 
 ### `--inspect` vs `--inspect-brk`
 
-- **`--inspect-brk`**: Pauses on first line. Gives you time to attach and set breakpoints before any code runs. But the daemon can't serve requests until you resume it — bootstrap problem if you need the daemon running to debug it.
-- **`--inspect`**: Starts normally, debugger attaches when ready. The daemon is functional immediately but you may miss early initialization code. Use breakpoints to catch specific execution points.
+- **`--inspect-brk`**: Pauses on first line. Good for debugging startup. But the daemon can't serve its socket until you resume it — bootstrap problem.
+- **`--inspect`**: Starts normally with debug port open. Daemon is functional immediately. Use breakpoints to catch specific execution points.
 
 For daemon debugging, prefer `--inspect-brk` when investigating startup/initialization, and `--inspect` when debugging request handling.
 
 ### Ouroboros Pattern
 
-Two daemons debugging each other — useful for testing the debugger's own debugger protocol handling:
+Two daemons debugging each other — proven working for testing debugger protocol handling:
 
 ```sh
-# Daemon A: the "subject" — the one being debugged
+# Daemon A on socket A, debug port 9230
 DBG_SOCK=/tmp/dbg-a.sock DBG_EVENTS_DB=/tmp/dbg-a-events.db \
-  node --inspect=9230 dist/daemon.js
+  node --inspect=9230 packages/cli/dist/daemon.js
 
-# Daemon B: the "observer" — a second dbg instance that debugs A
+# Daemon B on socket B, debug port 9231
 DBG_SOCK=/tmp/dbg-b.sock DBG_EVENTS_DB=/tmp/dbg-b-events.db \
-  node --inspect=9231 dist/daemon.js
+  node --inspect=9231 packages/cli/dist/daemon.js
 
-# Use CLI to tell B to attach to A
+# A debugs B
+DBG_SOCK=/tmp/dbg-a.sock dbg open 9231
+
+# B debugs A
 DBG_SOCK=/tmp/dbg-b.sock dbg open 9230
 
-# Now you can also debug B from a third instance, or from the default daemon
-dbg open 9231
+# Now each can pause, step, and inspect the other
+DBG_SOCK=/tmp/dbg-a.sock dbg pause     # A pauses B
+DBG_SOCK=/tmp/dbg-a.sock dbg e "process.env.DBG_SOCK"  # → /tmp/dbg-b.sock
 ```
 
-**Deadlock avoidance**: If daemon A is paused at a breakpoint and daemon B sends a CDP message that requires A to respond, B will hang waiting. Always keep at least one daemon running freely. Don't pause both simultaneously unless you understand the message flow.
+**Deadlock avoidance**: Don't pause both daemons simultaneously. If A is paused and B sends a CDP message requiring A to respond, B hangs. Keep at least one daemon running.
 
 ### Eval Scope Gotcha
 
-`dbg e "<expression>"` evaluates in the **current call frame**, not module scope. This matters when paused:
+`dbg e` evaluates in the **current call frame**, not module scope:
 
-- If paused inside a function in your code → you can see that function's local variables
-- If paused in Node.js internals (e.g., after `--inspect-brk` before any user code runs) → you're in Node's bootstrap frame, not your module. Module-level variables like imports and `const` declarations are **not visible**
-- **Fix**: Set a breakpoint in your actual code (`dbg b yourfile.ts:10`), continue to it (`dbg c`), then evaluate. The call frame determines what's in scope.
+- Paused in your code → local variables visible
+- Paused in Node internals (e.g., `processTimers` after `pause`) → module-level variables not accessible
+- **Fix**: Set a breakpoint in your actual code, continue to it, then evaluate
 
 ```sh
-# Wrong: paused in Node internals after --inspect-brk
-dbg e "myConfig"  # → ReferenceError: myConfig is not defined
+# Wrong: paused in Node internals
+dbg e "myConfig"  # → ReferenceError
 
 # Right: continue to your code first
 dbg b daemon.ts:25

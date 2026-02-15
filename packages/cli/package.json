@@ -1,6 +1,7 @@
 {
 	"name": "@dbg/cli",
 	"version": "0.2.0",
+	"private": true,
 	"type": "module",
 	"bin": {
 		"dbg": "./bin/dbg"
@@ -16,6 +17,7 @@
 	"dependencies": {
 		"@dbg/adapter-cdp": "workspace:*",
 		"@dbg/adapter-dap": "workspace:*",
+		"@dbg/provider-apple-device": "workspace:*",
 		"@dbg/query": "workspace:*",
 		"@dbg/store": "workspace:*",
 		"@dbg/tables-browser": "workspace:*",

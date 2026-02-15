@@ -68,6 +68,49 @@ dbg restart                   # breakpoints survive
 dbg close
 ```
 
+## Apple Devices and Simulators (iOS/tvOS/watchOS/visionOS)
+
+`dbg` can also attach to Apple apps via LLDB DAP (no UI, agent-friendly).
+
+Requirements:
+
+- macOS (Apple provider requires `xcrun`)
+- Xcode Command Line Tools installed (`xcrun`, `lldb-dap`, `devicectl`, `simctl`)
+
+List available targets:
+
+```sh
+dbg devices
+dbg devices --platform ios
+```
+
+Attach to a running app by bundle id:
+
+```sh
+dbg attach com.example.myapp
+```
+
+Launch (if not running) then attach:
+
+```sh
+dbg attach com.example.myapp --launch
+```
+
+Force simulator vs physical device:
+
+```sh
+dbg attach com.example.myapp --device sim:"iPhone 15" --launch
+dbg attach com.example.myapp --device device:<udid-or-name> --launch
+```
+
+Tuning:
+
+```sh
+dbg attach com.example.myapp --attach-timeout 60 --verbose-attach
+dbg attach com.example.myapp --attach-strategy device-process
+dbg attach com.example.myapp --attach-strategy gdb-remote
+```
+
 ## Commands
 
 ### Lifecycle

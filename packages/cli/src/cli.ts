@@ -14,10 +14,169 @@ import {
 	formatStatus,
 	formatTsv,
 } from "./format.js";
-import type { Command, Response } from "@dbg/types";
+import type {
+	AttachPlatform,
+	AttachProvider,
+	AttachRequest,
+	AttachStrategy,
+	Command,
+	Response,
+} from "@dbg/types";
 import { SOCKET_PATH } from "@dbg/types";
 
 // ─── Parse argv ───
+
+const SUPPORTED_ATTACH_PROVIDERS: AttachProvider[] = ["apple-device"];
+const SUPPORTED_ATTACH_PLATFORMS: AttachPlatform[] = [
+	"auto",
+	"ios",
+	"tvos",
+	"watchos",
+	"visionos",
+];
+const SUPPORTED_ATTACH_STRATEGIES: AttachStrategy[] = [
+	"auto",
+	"device-process",
+	"gdb-remote",
+];
+
+function parseAttachArgs(tokens: string[]): AttachRequest {
+	let provider: AttachProvider = "apple-device";
+	let platform: AttachPlatform = "auto";
+	let bundleId = "";
+	let device: string | undefined;
+	let pid: number | undefined;
+	let launch = false;
+	let attachStrategy: AttachStrategy | undefined;
+	let attachTimeoutMs: number | undefined;
+	let verbose = false;
+
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		switch (token) {
+			case "--provider": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error("usage: dbg attach <bundle-id> [--provider <name>]");
+				}
+				i++;
+				if (!SUPPORTED_ATTACH_PROVIDERS.includes(value as AttachProvider)) {
+					throw new Error(
+						`unsupported provider '${value}'. Supported: ${SUPPORTED_ATTACH_PROVIDERS.join(", ")}`,
+					);
+				}
+				provider = value as AttachProvider;
+				break;
+			}
+			case "--platform": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error(
+						"usage: dbg attach <bundle-id> [--platform <platform>]",
+					);
+				}
+				i++;
+				if (!SUPPORTED_ATTACH_PLATFORMS.includes(value as AttachPlatform)) {
+					throw new Error(
+						`unsupported platform '${value}'. Supported: ${SUPPORTED_ATTACH_PLATFORMS.join(", ")}`,
+					);
+				}
+				platform = value as AttachPlatform;
+				break;
+			}
+			case "--device": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error("usage: dbg attach <bundle-id> [--device <id>]");
+				}
+				i++;
+				device = value;
+				break;
+			}
+			case "--pid": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error("usage: dbg attach <bundle-id> [--pid <pid>]");
+				}
+				i++;
+				const parsedPid = Number.parseInt(value, 10);
+				if (!Number.isInteger(parsedPid) || parsedPid <= 0) {
+					throw new Error("pid must be a positive integer");
+				}
+				pid = parsedPid;
+				break;
+			}
+			case "--launch":
+				launch = true;
+				break;
+			case "--attach-strategy": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error(
+						"usage: dbg attach <bundle-id> [--attach-strategy auto|device-process|gdb-remote]",
+					);
+				}
+				i++;
+				if (!SUPPORTED_ATTACH_STRATEGIES.includes(value as AttachStrategy)) {
+					throw new Error(
+						`unsupported attach strategy '${value}'. Supported: ${SUPPORTED_ATTACH_STRATEGIES.join(", ")}`,
+					);
+				}
+				attachStrategy = value as AttachStrategy;
+				break;
+			}
+			case "--attach-timeout": {
+				const value = tokens[i + 1];
+				if (!value) {
+					throw new Error(
+						"usage: dbg attach <bundle-id> [--attach-timeout <seconds>]",
+					);
+				}
+				i++;
+				const parsedSeconds = Number(value);
+				if (!Number.isFinite(parsedSeconds) || parsedSeconds <= 0) {
+					throw new Error(
+						"attach-timeout must be a positive number of seconds",
+					);
+				}
+				attachTimeoutMs = Math.round(parsedSeconds * 1000);
+				break;
+			}
+			case "--verbose-attach":
+				verbose = true;
+				break;
+			default:
+				if (token.startsWith("--")) {
+					throw new Error(`unknown attach flag: ${token}`);
+				}
+				if (!bundleId) {
+					bundleId = token;
+				} else {
+					throw new Error(`unexpected attach argument: ${token}`);
+				}
+		}
+	}
+
+	if (!bundleId) {
+		throw new Error(
+			"usage: dbg attach <bundle-id> [--device <id>] [--pid <pid>] [--launch] [--provider apple-device] [--platform auto|ios|tvos|watchos|visionos] [--attach-strategy auto|device-process|gdb-remote] [--attach-timeout <seconds>] [--verbose-attach]",
+		);
+	}
+
+	const request: AttachRequest = {
+		provider,
+		platform,
+		bundleId,
+		protocol: "dap",
+	};
+	if (device) request.device = device;
+	if (pid) request.pid = pid;
+	if (launch) request.launch = true;
+	if (attachStrategy) request.attachStrategy = attachStrategy;
+	if (attachTimeoutMs) request.attachTimeoutMs = attachTimeoutMs;
+	if (verbose) request.verbose = true;
+	return request;
+}
 
 function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 	// argv[0] = node, argv[1] = script
@@ -63,6 +222,46 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 	}
 
 	switch (command) {
+		case "devices": {
+			// Agent-friendly listing of Apple device + simulator candidates.
+			const tokens = cmdArgs.slice(1);
+			let platform: AttachPlatform | undefined;
+			for (let i = 0; i < tokens.length; i++) {
+				const token = tokens[i];
+				switch (token) {
+					case "--platform": {
+						const value = tokens[i + 1];
+						if (!value) {
+							error(
+								"usage: dbg devices [--platform auto|ios|tvos|watchos|visionos]",
+							);
+							return null;
+						}
+						i++;
+						if (!SUPPORTED_ATTACH_PLATFORMS.includes(value as AttachPlatform)) {
+							error(
+								`unsupported platform '${value}'. Supported: ${SUPPORTED_ATTACH_PLATFORMS.join(", ")}`,
+							);
+							return null;
+						}
+						platform = value as AttachPlatform;
+						break;
+					}
+					default:
+						if (token.trim() === "") continue;
+						error(`unknown devices flag: ${token}`);
+						return null;
+				}
+			}
+
+			const payload: Record<string, unknown> = {};
+			if (platform) payload.platform = platform;
+			const args = Object.keys(payload).length
+				? JSON.stringify(payload)
+				: undefined;
+			return { cmd: withSession({ cmd: "devices", args }), jsonMode };
+		}
+
 		case "open": {
 			if (!rest) {
 				error(
@@ -96,12 +295,29 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 			return { cmd, jsonMode };
 		}
 
-		case "attach-lldb": {
-			if (!rest) {
-				error("usage: dbg attach-lldb <program-path>");
+		case "attach": {
+			let request: AttachRequest;
+			try {
+				request = parseAttachArgs(cmdArgs.slice(1));
+			} catch (err) {
+				error((err as Error).message);
 				return null;
 			}
-			return { cmd: withSession({ cmd: "attach-lldb", args: rest }), jsonMode };
+			return {
+				cmd: withSession({ cmd: "attach", args: JSON.stringify(request) }),
+				jsonMode,
+			};
+		}
+
+		case "attach-lldb": {
+			if (!rest) {
+				error("usage: dbg attach-lldb <program-path> [args...]");
+				return null;
+			}
+			return {
+				cmd: withSession({ cmd: "attach-lldb", args: rest }),
+				jsonMode,
+			};
 		}
 
 		case "close":
@@ -319,7 +535,10 @@ function printUsage(): void {
 
 commands:
   open <port> [name]       Connect to debug port (optional session name)
-  attach-lldb <program>    Start lldb-dap and attach native debugger session
+  attach <bundle-id>       Attach to app on device via provider (DAP)
+                           Flags: --device --pid --launch --attach-strategy --attach-timeout --verbose-attach
+  devices                  List Apple devices + simulators (TSV)
+  attach-lldb <program>    Launch lldb-dap for local native binary
   close                    Disconnect session
   run <command>            Spawn process with --inspect-brk and connect
   restart                  Restart managed process
@@ -336,7 +555,7 @@ commands:
   bl                       List breakpoints
   e <expression>           Evaluate expression
   src [file start end]     View source
-  trace [limit]            Show recent CDP messages
+  trace [limit]            Show recent protocol messages
   health                   Verify debugger connection health
   reconnect                Reconnect to last websocket target
   navigate <url|reload|back>  Navigate browser page
@@ -369,10 +588,18 @@ A background daemon holds CDP connections between calls.
 
 LIFECYCLE
   dbg open <port|host:port> [name]  Attach to a running debug target.
-  dbg attach-lldb ./a.out           Start lldb-dap and debug native binary.
+  dbg attach com.workstation.app --provider apple-device --platform auto
+                                     Attach to running app on Apple device/simulator.
+  dbg attach com.workstation.app --attach-strategy auto --attach-timeout 45
+                                     Attach with strategy fallback + timeout override.
+  dbg devices                         List available Apple device/simulator targets.
+  dbg attach-lldb ./a.out            Launch LLDB DAP for local binary.
   dbg open 9229                     Local port (auto-named session).
   dbg open 9229 be                  Named session "be".
   dbg open 192.168.1.5:9229 remote  Remote host, named "remote".
+  dbg attach <bundle-id>            Generic attach command.
+  dbg attach com.workstation.app --device <id|sim:name|device:udid> [--pid <pid>] [--verbose-attach]
+                                    Attach by provider-resolved PID on device or simulator.
   dbg open 9222 --type page            Explicitly target browser page.
   dbg open 9222 --target <id>          Connect to specific tab by ID.
   dbg targets 9222                     List all debuggable targets.
@@ -417,7 +644,7 @@ INSPECTION
   dbg e "process.pid"            Example. Output: bare value, one line.
   dbg src                        View source around current paused location.
   dbg src <file> <start> <end>   View specific line range.
-  dbg trace [limit]              Show recent CDP send/recv history.
+  dbg trace [limit]              Show recent protocol send/recv history.
   dbg health                     Probe Runtime.evaluate("1+1"), report latency.
   dbg reconnect                  Reconnect to the last known websocket URL.
 
@@ -591,7 +818,7 @@ async function ensureDaemon(): Promise<void> {
 
 // ─── Socket communication ───
 
-function sendCommand(cmd: Command): Promise<Response> {
+function sendCommand(cmd: Command, timeoutMs: number): Promise<Response> {
 	return new Promise((resolve, reject) => {
 		const socket = net.createConnection(SOCKET_PATH);
 		let buffer = "";
@@ -622,11 +849,45 @@ function sendCommand(cmd: Command): Promise<Response> {
 			);
 		});
 
-		socket.setTimeout(60000, () => {
+		socket.setTimeout(timeoutMs, () => {
 			socket.destroy();
-			reject(new Error("timeout waiting for daemon response"));
+			reject(
+				new Error(
+					`timeout waiting for daemon response (${Math.ceil(timeoutMs / 1000)}s)`,
+				),
+			);
 		});
 	});
+}
+
+function computeCommandTimeoutMs(cmd: Command): number {
+	const DEFAULT_TIMEOUT_MS = 60000;
+
+	if (cmd.cmd === "attach") {
+		const DEFAULT_ATTACH_TIMEOUT_MS = 45000;
+		try {
+			const request = JSON.parse(cmd.args) as {
+				attachTimeoutMs?: unknown;
+				attachStrategy?: unknown;
+			};
+			const base =
+				typeof request.attachTimeoutMs === "number" &&
+				Number.isFinite(request.attachTimeoutMs) &&
+				request.attachTimeoutMs > 0
+					? Math.round(request.attachTimeoutMs)
+					: DEFAULT_ATTACH_TIMEOUT_MS;
+			const strategy =
+				typeof request.attachStrategy === "string"
+					? request.attachStrategy
+					: "auto";
+			const attempts = strategy === "auto" ? 2 : 1;
+			return Math.max(DEFAULT_TIMEOUT_MS, base * attempts + 30000);
+		} catch {
+			return DEFAULT_TIMEOUT_MS;
+		}
+	}
+
+	return DEFAULT_TIMEOUT_MS;
 }
 
 // ─── Output formatting ───
@@ -662,6 +923,8 @@ function formatResponse(
 			r.function,
 			r.pid,
 			r.s,
+			r.phase,
+			r.lastErrorCode,
 		);
 	}
 
@@ -729,8 +992,13 @@ async function main(): Promise<void> {
 		}
 	}
 
+	// `close` should be idempotent and not auto-start the daemon.
+	if (cmd.cmd === "close" && !fs.existsSync(SOCKET_PATH)) {
+		process.exit(0);
+	}
+
 	try {
-		const response = await sendCommand(cmd);
+		const response = await sendCommand(cmd, computeCommandTimeoutMs(cmd));
 
 		if (!response.ok) {
 			error(response.error);
@@ -742,6 +1010,15 @@ async function main(): Promise<void> {
 			process.stdout.write(`${output}\n`);
 		}
 	} catch (e) {
+		if (cmd.cmd === "close") {
+			// If the daemon isn't running (or the socket is stale), treat close as a no-op.
+			try {
+				fs.unlinkSync(SOCKET_PATH);
+			} catch {
+				// ignore
+			}
+			process.exit(0);
+		}
 		error((e as Error).message);
 		process.exit(1);
 	}

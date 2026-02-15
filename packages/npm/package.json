@@ -1,0 +1,24 @@
+{
+	"name": "@douglance/dbg",
+	"version": "0.2.0",
+	"description": "Stateless, non-interactive debugger CLI for automation (CDP + LLDB DAP).",
+	"license": "MIT",
+	"type": "module",
+	"bin": {
+		"dbg": "./bin/dbg"
+	},
+	"files": ["bin", "dist", "README.md", "LICENSE"],
+	"engines": {
+		"node": ">=22"
+	},
+	"dependencies": {
+		"chrome-remote-interface": "^0.33.2"
+	},
+	"scripts": {
+		"build": "node scripts/build.mjs",
+		"prepack": "node scripts/build.mjs"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}

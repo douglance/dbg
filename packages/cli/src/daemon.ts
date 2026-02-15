@@ -10,12 +10,21 @@ import {
 	listTargets,
 } from "@dbg/adapter-cdp";
 import { DapClientWrapper } from "@dbg/adapter-dap";
+import {
+	ATTACH_PLATFORMS,
+	AppleDeviceProviderError,
+	listAppleAttachTargets,
+	parseAttachRequest,
+	resolveAppleDeviceAttachTarget,
+} from "@dbg/provider-apple-device";
 import { executeQuery, TableRegistry } from "@dbg/query";
 import { EventStore } from "@dbg/store";
 import { registerBrowserTables } from "@dbg/tables-browser";
 import { registerCoreTables } from "@dbg/tables-core";
 import { registerNativeTables } from "@dbg/tables-native";
 import type {
+	AttachDiagnostics,
+	AttachPlatform,
 	Command,
 	CssCoverageEntry,
 	DaemonState,
@@ -27,6 +36,7 @@ import type {
 	StoredBreakpoint,
 } from "@dbg/types";
 import { SOCKET_PATH, createEmptyDebuggerState } from "@dbg/types";
+import { executeAttachWithStrategy } from "./attach-strategy.js";
 import {
 	handleContinue,
 	handleDeleteBreakpoint,
@@ -107,6 +117,54 @@ function asDapExecutor(session: Session): DapClientWrapper | null {
 	return session.executor.protocol === "dap"
 		? (session.executor as DapClientWrapper)
 		: null;
+}
+
+function findSessionByPid(pid: number): Session | null {
+	for (const session of registry.sessions.values()) {
+		if (!session.state.connected) continue;
+		if (session.state.pid === pid) {
+			return session;
+		}
+	}
+	return null;
+}
+
+function formatAttachDiagnostics(diagnostics: AttachDiagnostics): string[] {
+	const lines: string[] = [];
+	lines.push(
+		`attach strategy: requested=${diagnostics.requestedStrategy}, selected=${diagnostics.selectedStrategy ?? "none"}`,
+	);
+	lines.push(
+		`attach timings: providerResolveMs=${diagnostics.providerResolveMs}, totalMs=${diagnostics.totalMs}`,
+	);
+	for (const attempt of diagnostics.attemptedStrategies) {
+		lines.push(
+			`attach attempt: strategy=${attempt.strategy}, success=${attempt.success}, durationMs=${attempt.durationMs}${attempt.error ? `, error=${attempt.error}` : ""}`,
+		);
+	}
+	return lines;
+}
+
+function createEmptyAttachDiagnostics(
+	requestedStrategy: AttachDiagnostics["requestedStrategy"],
+	providerResolveMs: number,
+): AttachDiagnostics {
+	return {
+		requestedStrategy,
+		attemptedStrategies: [],
+		selectedStrategy: null,
+		providerResolveMs,
+		totalMs: providerResolveMs,
+	};
+}
+
+function isSimulatorAttachResolution(
+	resolution: ReturnType<typeof resolveAppleDeviceAttachTarget>,
+): boolean {
+	return (
+		String(resolution.metadata?.attachEnvironment ?? "").toLowerCase() ===
+		"simulator"
+	);
 }
 
 // ─── Lifecycle commands ───
@@ -309,6 +367,257 @@ async function handleRun(
 	}
 }
 
+async function handleAttach(
+	args: string,
+	sessionName?: string,
+): Promise<Response> {
+	const name = sessionName ?? nextSessionName();
+	if (registry.sessions.has(name)) {
+		return {
+			ok: false,
+			error: "session already exists; close it first",
+		};
+	}
+
+	let request: ReturnType<typeof parseAttachRequest>;
+	try {
+		request = parseAttachRequest(args);
+	} catch (error) {
+		return {
+			ok: false,
+			error: `invalid attach request: ${(error as Error).message}`,
+		};
+	}
+	if (request.protocol && request.protocol !== "dap") {
+		return {
+			ok: false,
+			error: `unsupported attach protocol '${request.protocol}'`,
+		};
+	}
+	const requestedStrategy = request.attachStrategy ?? "auto";
+
+	const state = createState();
+	store.record(
+		{
+			source: "daemon",
+			category: "connection",
+			method: "apple.attach.start",
+			data: request,
+		},
+		true,
+	);
+
+	const providerResolveStartedAt = Date.now();
+	let resolution: ReturnType<typeof resolveAppleDeviceAttachTarget>;
+	try {
+		resolution = resolveAppleDeviceAttachTarget(request);
+	} catch (error) {
+		const providerResolveMs = Date.now() - providerResolveStartedAt;
+		const diagnostics = createEmptyAttachDiagnostics(
+			requestedStrategy,
+			providerResolveMs,
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.diagnostics",
+				data: diagnostics,
+			},
+			true,
+		);
+		if (error instanceof AppleDeviceProviderError) {
+			store.record(
+				{
+					source: "daemon",
+					category: "connection",
+					method: "apple.attach.error",
+					data: error.toProviderError(),
+				},
+				true,
+			);
+			return {
+				ok: false,
+				error: error.message,
+				errorCode: error.code,
+			};
+		}
+		return { ok: false, error: (error as Error).message };
+	}
+
+	const providerResolveMs = Date.now() - providerResolveStartedAt;
+
+	const staleSession = findSessionByPid(resolution.pid);
+	if (staleSession) {
+		const diagnostics = createEmptyAttachDiagnostics(
+			requestedStrategy,
+			providerResolveMs,
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.diagnostics",
+				data: diagnostics,
+			},
+			true,
+		);
+		const providerError = new AppleDeviceProviderError(
+			"invalid_request",
+			`pid ${resolution.pid} is already attached in session ${staleSession.name}`,
+			{
+				session: staleSession.name,
+				pid: resolution.pid,
+				bundleId: resolution.bundleId,
+			},
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.error",
+				data: providerError.toProviderError(),
+			},
+			true,
+		);
+		return {
+			ok: false,
+			error: providerError.message,
+			errorCode: providerError.code,
+		};
+	}
+
+	let attempt: Awaited<ReturnType<typeof executeAttachWithStrategy>>;
+	try {
+		attempt = await executeAttachWithStrategy({
+			request,
+			resolution,
+			state,
+			store,
+			providerResolveMs,
+		});
+	} catch (error) {
+		const diagnostics = createEmptyAttachDiagnostics(
+			requestedStrategy,
+			providerResolveMs,
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.diagnostics",
+				data: diagnostics,
+			},
+			true,
+		);
+		const providerError = new AppleDeviceProviderError(
+			"provider_error",
+			"attach strategy execution failed unexpectedly",
+			{
+				originalError: (error as Error).message,
+			},
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.error",
+				data: providerError.toProviderError(),
+			},
+			true,
+		);
+		return {
+			ok: false,
+			error: providerError.message,
+			errorCode: providerError.code,
+		};
+	}
+	store.record(
+		{
+			source: "daemon",
+			category: "connection",
+			method: "apple.attach.diagnostics",
+			data: attempt.diagnostics,
+		},
+		true,
+	);
+
+	if (!attempt.success) {
+		await attempt.dap.disconnect();
+		const providerError = new AppleDeviceProviderError(
+			"attach_denied_or_timeout",
+			"attach failed before debugger reached a debuggable stopped state",
+			{
+				hint: isSimulatorAttachResolution(resolution)
+					? "Ensure the Simulator is booted, the app is running, and the process is attachable."
+					: "Ensure no other debugger is attached, the app build permits debugger attach (get-task-allow), and CoreDevice tunnel/debugproxy is active for gdb-remote fallback.",
+				originalError: attempt.error,
+				diagnostics: attempt.diagnostics,
+			},
+		);
+		store.record(
+			{
+				source: "daemon",
+				category: "connection",
+				method: "apple.attach.error",
+				data: providerError.toProviderError(),
+			},
+			true,
+		);
+		return {
+			ok: false,
+			error: `${providerError.message}. Last error: ${attempt.error ?? "unknown"}`,
+			errorCode: providerError.code,
+			phase: state.dap?.phase,
+		};
+	}
+
+	const session: Session = {
+		name,
+		state,
+		executor: attempt.dap,
+		managedChild: null,
+		targetType: "native",
+		port: 0,
+		host: resolution.deviceId,
+		targetTitle: resolution.bundleId,
+	};
+	registry.sessions.set(name, session);
+	registry.current = name;
+
+	store.record(
+		{
+			source: "daemon",
+			category: "connection",
+			method: "apple.attach.success",
+			data: {
+				deviceId: resolution.deviceId,
+				bundleId: resolution.bundleId,
+				pid: resolution.pid,
+				strategy: attempt.strategy,
+				diagnostics: attempt.diagnostics,
+			},
+		},
+		true,
+	);
+
+	const messages = [
+		`attached ${resolution.bundleId} on ${resolution.deviceId} (pid ${resolution.pid})`,
+	];
+	if (request.verbose) {
+		messages.push(...formatAttachDiagnostics(attempt.diagnostics));
+	}
+
+	return {
+		ok: true,
+		connected: true,
+		status: state.paused ? "paused" : "running",
+		pid: resolution.pid,
+		s: name,
+		messages,
+	};
+}
+
 async function handleAttachLldb(
 	args: string,
 	sessionName?: string,
@@ -351,12 +660,18 @@ async function handleAttachLldb(
 			ok: true,
 			connected: true,
 			status: state.paused ? "paused" : "running",
+			phase: state.dap?.phase,
 			s: name,
 			messages: [`attached lldb to ${programPath}`],
 		};
 	} catch (error) {
 		await dap.disconnect();
-		return { ok: false, error: (error as Error).message };
+		return {
+			ok: false,
+			error: (error as Error).message,
+			errorCode: parseErrorCode(error),
+			phase: state.dap?.phase,
+		};
 	}
 }
 
@@ -486,6 +801,70 @@ async function handleTargets(args: string): Promise<Response> {
 		};
 	} catch (e) {
 		return { ok: false, error: (e as Error).message };
+	}
+}
+
+// ─── Apple device/simulator listing ───
+
+async function handleDevices(args?: string): Promise<Response> {
+	let platform: AttachPlatform = "auto";
+	if (args?.trim()) {
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(args);
+		} catch {
+			return {
+				ok: false,
+				error: "invalid devices args: expected JSON { platform?: string }",
+			};
+		}
+		if (parsed && typeof parsed === "object" && "platform" in parsed) {
+			const value = (parsed as { platform?: unknown }).platform;
+			if (typeof value === "string" && value.trim()) {
+				const next = value.trim() as AttachPlatform;
+				if (!ATTACH_PLATFORMS.includes(next)) {
+					return {
+						ok: false,
+						error: `unsupported platform '${value.trim()}'. Supported: ${ATTACH_PLATFORMS.join(", ")}`,
+					};
+				}
+				platform = next;
+			}
+		}
+	}
+
+	try {
+		const targets = listAppleAttachTargets(platform);
+		return {
+			ok: true,
+			columns: [
+				"kind",
+				"platform",
+				"booted",
+				"identifier",
+				"udid",
+				"name",
+				"runtime",
+			],
+			rows: targets.map((t) => [
+				t.kind,
+				t.platform,
+				t.booted,
+				t.identifier,
+				t.udid ?? "",
+				t.name,
+				t.runtime ?? "",
+			]),
+		};
+	} catch (error) {
+		if (error instanceof AppleDeviceProviderError) {
+			return {
+				ok: false,
+				error: error.message,
+				errorCode: error.code,
+			};
+		}
+		return { ok: false, error: (error as Error).message };
 	}
 }
 
@@ -1224,10 +1603,14 @@ async function dispatch(cmd: Command): Promise<Response> {
 	const sessionName = cmd.s;
 
 	switch (cmd.cmd) {
+		case "devices":
+			return handleDevices(cmd.args);
 		case "open":
 			return handleOpen(cmd.args, sessionName);
 		case "attach-lldb":
 			return handleAttachLldb(cmd.args, sessionName);
+		case "attach":
+			return handleAttach(cmd.args, sessionName);
 		case "run":
 			return handleRun(cmd.args, sessionName);
 		case "ss":
@@ -1477,6 +1860,14 @@ function startServer(): void {
 		cleanup();
 		process.exit(1);
 	});
+}
+
+function parseErrorCode(error: unknown): string | undefined {
+	if (!error || typeof error !== "object" || !("code" in error)) {
+		return undefined;
+	}
+	const code = (error as { code?: unknown }).code;
+	return typeof code === "string" && code ? code : undefined;
 }
 
 function processLine(socket: net.Socket, line: string): void {
