@@ -1,6 +1,7 @@
 // Thin CLI client: parses argv, connects to daemon socket, formats output
 
 import { fork } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import { dirname, join } from "node:path";
@@ -22,7 +23,9 @@ import type {
 	Command,
 	Response,
 } from "@dbg/types";
-import { SOCKET_PATH } from "@dbg/types";
+
+const DEFAULT_SOCKET_PATH = "/tmp/dbg.sock";
+const DEFAULT_EVENTS_DB_PATH = "/tmp/dbg-events.db";
 
 // ─── Parse argv ───
 
@@ -39,6 +42,56 @@ const SUPPORTED_ATTACH_STRATEGIES: AttachStrategy[] = [
 	"device-process",
 	"gdb-remote",
 ];
+
+interface DaemonPaths {
+	socketPath: string;
+	eventsDbPath: string;
+	explicitSocket: boolean;
+	explicitEventsDb: boolean;
+	usingFallback: boolean;
+}
+
+function resolveInitialDaemonPaths(): DaemonPaths {
+	const envSocket = process.env.DBG_SOCK?.trim();
+	const envEvents = process.env.DBG_EVENTS_DB?.trim();
+	return {
+		socketPath: envSocket || DEFAULT_SOCKET_PATH,
+		eventsDbPath: envEvents || DEFAULT_EVENTS_DB_PATH,
+		explicitSocket: Boolean(envSocket),
+		explicitEventsDb: Boolean(envEvents),
+		usingFallback: false,
+	};
+}
+
+function canUseAutomaticFallback(paths: DaemonPaths): boolean {
+	return (
+		!paths.explicitSocket && !paths.explicitEventsDb && !paths.usingFallback
+	);
+}
+
+function buildFallbackDaemonPaths(paths: DaemonPaths): DaemonPaths {
+	const uid =
+		typeof process.getuid === "function" ? String(process.getuid()) : "0";
+	const repoHash = createHash("sha1")
+		.update(process.cwd())
+		.digest("hex")
+		.slice(0, 10);
+	return {
+		socketPath: `/tmp/dbg-${uid}-${repoHash}.sock`,
+		eventsDbPath: `/tmp/dbg-${uid}-${repoHash}-events.db`,
+		explicitSocket: paths.explicitSocket,
+		explicitEventsDb: paths.explicitEventsDb,
+		usingFallback: true,
+	};
+}
+
+function daemonEnv(paths: DaemonPaths): NodeJS.ProcessEnv {
+	return {
+		...process.env,
+		DBG_SOCK: paths.socketPath,
+		DBG_EVENTS_DB: paths.eventsDbPath,
+	};
+}
 
 function parseAttachArgs(tokens: string[]): AttachRequest {
 	let provider: AttachProvider = "apple-device";
@@ -260,6 +313,16 @@ function parseArgs(argv: string[]): { cmd: Command; jsonMode: boolean } | null {
 				? JSON.stringify(payload)
 				: undefined;
 			return { cmd: withSession({ cmd: "devices", args }), jsonMode };
+		}
+
+		case "apps": {
+			// List installed apps on a device.
+			const deviceId = cmdArgs.slice(1).join(" ").trim();
+			if (!deviceId) {
+				error("usage: dbg apps <device-id>");
+				return null;
+			}
+			return { cmd: withSession({ cmd: "apps", args: deviceId }), jsonMode };
 		}
 
 		case "open": {
@@ -537,6 +600,7 @@ commands:
   open <port> [name]       Connect to debug port (optional session name)
   attach <bundle-id>       Attach to app on device via provider (DAP)
                            Flags: --device --pid --launch --attach-strategy --attach-timeout --verbose-attach
+  apps <device-id>         List installed apps on a device (TSV)
   devices                  List Apple devices + simulators (TSV)
   attach-lldb <program>    Launch lldb-dap for local native binary
   close                    Disconnect session
@@ -600,6 +664,8 @@ LIFECYCLE
   dbg attach <bundle-id>            Generic attach command.
   dbg attach com.workstation.app --device <id|sim:name|device:udid> [--pid <pid>] [--verbose-attach]
                                     Attach by provider-resolved PID on device or simulator.
+                                    When both simulator and physical targets are booted,
+                                    --device is required to avoid ambiguous selection.
   dbg open 9222 --type page            Explicitly target browser page.
   dbg open 9222 --target <id>          Connect to specific tab by ID.
   dbg targets 9222                     List all debuggable targets.
@@ -752,6 +818,8 @@ ENVIRONMENT
   DBG_SOCK          Socket path for daemon (default: /tmp/dbg.sock)
   DBG_EVENTS_DB     Event store path (default: /tmp/dbg-events.db)
                     Set to a persistent path to accumulate history across runs.
+                    If both are unset and defaults are unhealthy, dbg retries
+                    with deterministic per-user/per-repo fallback paths in /tmp.
 
 SELF-DEBUGGING
   To debug dbg's own daemon, run a second instance on a different socket:
@@ -763,13 +831,13 @@ SELF-DEBUGGING
 
 // ─── Daemon management ───
 
-function isDaemonRunning(): Promise<boolean> {
+function isDaemonRunning(socketPath: string): Promise<boolean> {
 	return new Promise((resolve) => {
-		if (!fs.existsSync(SOCKET_PATH)) {
+		if (!fs.existsSync(socketPath)) {
 			resolve(false);
 			return;
 		}
-		const socket = net.createConnection(SOCKET_PATH);
+		const socket = net.createConnection(socketPath);
 		socket.on("connect", () => {
 			socket.destroy();
 			resolve(true);
@@ -784,12 +852,12 @@ function isDaemonRunning(): Promise<boolean> {
 	});
 }
 
-async function ensureDaemon(): Promise<void> {
-	if (await isDaemonRunning()) return;
+async function ensureDaemon(paths: DaemonPaths): Promise<void> {
+	if (await isDaemonRunning(paths.socketPath)) return;
 
 	// Clean up stale socket file
 	try {
-		fs.unlinkSync(SOCKET_PATH);
+		fs.unlinkSync(paths.socketPath);
 	} catch {
 		// doesn't exist
 	}
@@ -802,7 +870,7 @@ async function ensureDaemon(): Promise<void> {
 	const child = fork(daemonPath, [], {
 		detached: true,
 		stdio: "ignore",
-		env: process.env,
+		env: daemonEnv(paths),
 	});
 	child.unref();
 	child.disconnect?.();
@@ -811,16 +879,22 @@ async function ensureDaemon(): Promise<void> {
 	const deadline = Date.now() + 5000;
 	while (Date.now() < deadline) {
 		await new Promise((r) => setTimeout(r, 100));
-		if (await isDaemonRunning()) return;
+		if (await isDaemonRunning(paths.socketPath)) return;
 	}
-	throw new Error("daemon failed to start (socket not created)");
+	throw new Error(
+		`daemon failed to start (socket not created at ${paths.socketPath})`,
+	);
 }
 
 // ─── Socket communication ───
 
-function sendCommand(cmd: Command, timeoutMs: number): Promise<Response> {
+function sendCommand(
+	cmd: Command,
+	timeoutMs: number,
+	socketPath: string,
+): Promise<Response> {
 	return new Promise((resolve, reject) => {
-		const socket = net.createConnection(SOCKET_PATH);
+		const socket = net.createConnection(socketPath);
 		let buffer = "";
 
 		socket.on("connect", () => {
@@ -845,7 +919,7 @@ function sendCommand(cmd: Command, timeoutMs: number): Promise<Response> {
 
 		socket.on("error", (err) => {
 			reject(
-				new Error(`cannot connect to daemon at ${SOCKET_PATH}: ${err.message}`),
+				new Error(`cannot connect to daemon at ${socketPath}: ${err.message}`),
 			);
 		});
 
@@ -858,6 +932,61 @@ function sendCommand(cmd: Command, timeoutMs: number): Promise<Response> {
 			);
 		});
 	});
+}
+
+async function ensureDaemonWithFallback(
+	paths: DaemonPaths,
+): Promise<DaemonPaths> {
+	try {
+		await ensureDaemon(paths);
+		return paths;
+	} catch (primaryError) {
+		if (!canUseAutomaticFallback(paths)) {
+			throw primaryError;
+		}
+
+		const fallback = buildFallbackDaemonPaths(paths);
+		try {
+			await ensureDaemon(fallback);
+			return fallback;
+		} catch (fallbackError) {
+			throw new Error(
+				[
+					String((primaryError as Error).message),
+					`fallback daemon at ${fallback.socketPath} also failed: ${(fallbackError as Error).message}`,
+				].join("; "),
+			);
+		}
+	}
+}
+
+async function sendCommandWithFallback(
+	cmd: Command,
+	timeoutMs: number,
+	paths: DaemonPaths,
+): Promise<{ response: Response; paths: DaemonPaths }> {
+	try {
+		const response = await sendCommand(cmd, timeoutMs, paths.socketPath);
+		return { response, paths };
+	} catch (primaryError) {
+		if (!canUseAutomaticFallback(paths)) {
+			throw primaryError;
+		}
+
+		const fallback = buildFallbackDaemonPaths(paths);
+		try {
+			await ensureDaemon(fallback);
+			const response = await sendCommand(cmd, timeoutMs, fallback.socketPath);
+			return { response, paths: fallback };
+		} catch (fallbackError) {
+			throw new Error(
+				[
+					String((primaryError as Error).message),
+					`fallback daemon at ${fallback.socketPath} also failed: ${(fallbackError as Error).message}`,
+				].join("; "),
+			);
+		}
+	}
 }
 
 function computeCommandTimeoutMs(cmd: Command): number {
@@ -880,8 +1009,13 @@ function computeCommandTimeoutMs(cmd: Command): number {
 				typeof request.attachStrategy === "string"
 					? request.attachStrategy
 					: "auto";
-			const attempts = strategy === "auto" ? 2 : 1;
-			return Math.max(DEFAULT_TIMEOUT_MS, base * attempts + 30000);
+			const strategyAttempts = strategy === "auto" ? 2 : 1;
+			// Extra multiplier accounts for auto-retry with --launch in daemon
+			const retryMultiplier = 2;
+			return Math.max(
+				DEFAULT_TIMEOUT_MS,
+				base * strategyAttempts * retryMultiplier + 30000,
+			);
 		} catch {
 			return DEFAULT_TIMEOUT_MS;
 		}
@@ -980,12 +1114,13 @@ async function main(): Promise<void> {
 	}
 
 	const { cmd, jsonMode } = parsed;
+	let daemonPaths = resolveInitialDaemonPaths();
 
 	// Auto-start daemon for commands that need it
 	const needsDaemon = cmd.cmd !== "close";
 	if (needsDaemon) {
 		try {
-			await ensureDaemon();
+			daemonPaths = await ensureDaemonWithFallback(daemonPaths);
 		} catch (e) {
 			error((e as Error).message);
 			process.exit(1);
@@ -993,12 +1128,35 @@ async function main(): Promise<void> {
 	}
 
 	// `close` should be idempotent and not auto-start the daemon.
-	if (cmd.cmd === "close" && !fs.existsSync(SOCKET_PATH)) {
-		process.exit(0);
+	if (cmd.cmd === "close") {
+		if (!fs.existsSync(daemonPaths.socketPath) && canUseAutomaticFallback(daemonPaths)) {
+			const fallback = buildFallbackDaemonPaths(daemonPaths);
+			if (fs.existsSync(fallback.socketPath)) {
+				daemonPaths = fallback;
+			}
+		}
+		if (!fs.existsSync(daemonPaths.socketPath)) {
+			process.exit(0);
+		}
 	}
 
 	try {
-		const response = await sendCommand(cmd, computeCommandTimeoutMs(cmd));
+		let response: Response;
+		if (cmd.cmd === "close") {
+			response = await sendCommand(
+				cmd,
+				computeCommandTimeoutMs(cmd),
+				daemonPaths.socketPath,
+			);
+		} else {
+			const sent = await sendCommandWithFallback(
+				cmd,
+				computeCommandTimeoutMs(cmd),
+				daemonPaths,
+			);
+			daemonPaths = sent.paths;
+			response = sent.response;
+		}
 
 		if (!response.ok) {
 			error(response.error);
@@ -1013,7 +1171,7 @@ async function main(): Promise<void> {
 		if (cmd.cmd === "close") {
 			// If the daemon isn't running (or the socket is stale), treat close as a no-op.
 			try {
-				fs.unlinkSync(SOCKET_PATH);
+				fs.unlinkSync(daemonPaths.socketPath);
 			} catch {
 				// ignore
 			}

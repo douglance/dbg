@@ -366,8 +366,13 @@ export async function handlePause(
 		await executor.send("Debugger.pause");
 		await waitP;
 	} catch (error) {
+		const msg = (error as Error).message;
+		const isTimeout =
+			msg.includes("timeout") || msg.includes("timed out");
 		return flowFailure(
-			`pause failed: ${(error as Error).message}`,
+			isTimeout
+				? "pause failed: CoreDevice cannot interrupt running processes. Set breakpoints before continuing"
+				: `pause failed: ${msg}`,
 			errorCode(error, "DAP_PAUSE_FAILED"),
 			resolveDapPhase(executor, state),
 		);

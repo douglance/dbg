@@ -14,6 +14,7 @@ import {
 	ATTACH_PLATFORMS,
 	AppleDeviceProviderError,
 	listAppleAttachTargets,
+	listApps,
 	parseAttachRequest,
 	resolveAppleDeviceAttachTarget,
 } from "@dbg/provider-apple-device";
@@ -156,6 +157,33 @@ function createEmptyAttachDiagnostics(
 		providerResolveMs,
 		totalMs: providerResolveMs,
 	};
+}
+
+function formatProviderErrorMessage(error: AppleDeviceProviderError): string {
+	const details = error.details ?? {};
+	const lines = [error.message];
+
+	const hint = details.hint;
+	if (typeof hint === "string" && hint.trim()) {
+		lines.push(`Hint: ${hint.trim()}`);
+	}
+
+	const suggestedCommand = details.suggestedCommand;
+	if (typeof suggestedCommand === "string" && suggestedCommand.trim()) {
+		lines.push(`Try: ${suggestedCommand.trim()}`);
+	}
+
+	const suggestedCommands = details.suggestedCommands;
+	if (Array.isArray(suggestedCommands)) {
+		for (const entry of suggestedCommands) {
+			if (typeof entry !== "string") continue;
+			const command = entry.trim();
+			if (!command) continue;
+			lines.push(`Try: ${command}`);
+		}
+	}
+
+	return lines.join("\n");
 }
 
 function isSimulatorAttachResolution(
@@ -438,7 +466,7 @@ async function handleAttach(
 			);
 			return {
 				ok: false,
-				error: error.message,
+				error: formatProviderErrorMessage(error),
 				errorCode: error.code,
 			};
 		}
@@ -544,13 +572,69 @@ async function handleAttach(
 
 	if (!attempt.success) {
 		await attempt.dap.disconnect();
+
+		// Auto-retry with --launch for physical devices when launch wasn't requested
+		if (!request.launch && !isSimulatorAttachResolution(resolution)) {
+			store.record(
+				{
+					source: "daemon",
+					category: "connection",
+					method: "apple.attach.auto_retry_launch",
+					data: { bundleId: request.bundleId, originalError: attempt.error },
+				},
+				true,
+			);
+
+			const retryRequest = { ...request, launch: true };
+			let retryResolution: ReturnType<typeof resolveAppleDeviceAttachTarget>;
+			try {
+				retryResolution = resolveAppleDeviceAttachTarget(retryRequest);
+			} catch (retryError) {
+				return {
+					ok: false,
+					error: `auto-retry with --launch failed during resolve: ${(retryError as Error).message}`,
+					phase: state.dap?.phase,
+				};
+			}
+
+			const retryState = createState();
+			let retryAttempt: Awaited<ReturnType<typeof executeAttachWithStrategy>>;
+			try {
+				retryAttempt = await executeAttachWithStrategy({
+					request: retryRequest,
+					resolution: retryResolution,
+					state: retryState,
+					store,
+					providerResolveMs: 0,
+				});
+			} catch (retryError) {
+				return {
+					ok: false,
+					error: `auto-retry with --launch failed: ${(retryError as Error).message}`,
+					phase: retryState.dap?.phase,
+				};
+			}
+
+			if (retryAttempt.success) {
+				return createAttachSession(
+					name,
+					retryRequest,
+					retryResolution,
+					retryAttempt,
+					retryState,
+					["auto-retried with --launch for debuggable session"],
+				);
+			}
+			await retryAttempt.dap.disconnect();
+		}
+
 		const providerError = new AppleDeviceProviderError(
 			"attach_denied_or_timeout",
 			"attach failed before debugger reached a debuggable stopped state",
 			{
 				hint: isSimulatorAttachResolution(resolution)
 					? "Ensure the Simulator is booted, the app is running, and the process is attachable."
-					: "Ensure no other debugger is attached, the app build permits debugger attach (get-task-allow), and CoreDevice tunnel/debugproxy is active for gdb-remote fallback.",
+					: "Physical devices require --launch for a debuggable session. Retry with: dbg attach <bundleId> --launch",
 				originalError: attempt.error,
 				diagnostics: attempt.diagnostics,
 			},
@@ -572,6 +656,17 @@ async function handleAttach(
 		};
 	}
 
+	return createAttachSession(name, request, resolution, attempt, state, []);
+}
+
+async function createAttachSession(
+	name: string,
+	request: ReturnType<typeof parseAttachRequest>,
+	resolution: ReturnType<typeof resolveAppleDeviceAttachTarget>,
+	attempt: Awaited<ReturnType<typeof executeAttachWithStrategy>>,
+	state: ReturnType<typeof createState>,
+	extraMessages: string[],
+): Promise<Response> {
 	const session: Session = {
 		name,
 		state,
@@ -602,10 +697,27 @@ async function handleAttach(
 	);
 
 	const messages = [
+		...extraMessages,
 		`attached ${resolution.bundleId} on ${resolution.deviceId} (pid ${resolution.pid})`,
 	];
 	if (request.verbose) {
 		messages.push(...formatAttachDiagnostics(attempt.diagnostics));
+	}
+
+	// Auto-continue past dyld to app code on --launch physical device attach
+	if (request.launch && !isSimulatorAttachResolution(resolution)) {
+		try {
+			const continueResult = await attempt.dap.continueToMain();
+			if (continueResult.hitMain && continueResult.location) {
+				messages.push(
+					`continued to ${continueResult.location.function} at ${continueResult.location.file}:${continueResult.location.line}`,
+				);
+			} else {
+				messages.push("could not auto-continue to main; paused in dyld");
+			}
+		} catch {
+			messages.push("could not auto-continue to main; paused in dyld");
+		}
 	}
 
 	return {
@@ -864,6 +976,25 @@ async function handleDevices(args?: string): Promise<Response> {
 				errorCode: error.code,
 			};
 		}
+		return { ok: false, error: (error as Error).message };
+	}
+}
+
+// ─── App listing ───
+
+async function handleApps(args: string): Promise<Response> {
+	const deviceId = args.trim();
+	if (!deviceId) {
+		return { ok: false, error: "usage: apps <device-id>" };
+	}
+	try {
+		const apps = listApps(deviceId);
+		return {
+			ok: true,
+			columns: ["bundleId", "name", "url"],
+			rows: apps.map((a) => [a.bundleIdentifier, a.name, a.url]),
+		};
+	} catch (error) {
 		return { ok: false, error: (error as Error).message };
 	}
 }
@@ -1583,11 +1714,13 @@ async function handleDisasmCommand(
 	const trimmed = (args ?? "").trim();
 	if (!trimmed) {
 		const frame = session.state.callFrames[0];
-		if (!frame?.scriptId) {
+		// Prefer instructionAddress (actual memory address) over scriptId (file path in DAP)
+		const address = frame?.instructionAddress ?? frame?.scriptId;
+		if (!address || looksLikeFilePath(address)) {
 			return { ok: false, error: "usage: disasm <address>" };
 		}
 		return handleQuery(
-			`SELECT * FROM disassembly WHERE address = '${frame.scriptId}' LIMIT 32`,
+			`SELECT * FROM disassembly WHERE address = '${address}' LIMIT 32`,
 			session,
 		);
 	}
@@ -1595,6 +1728,10 @@ async function handleDisasmCommand(
 		`SELECT * FROM disassembly WHERE address = '${trimmed}' LIMIT 32`,
 		session,
 	);
+}
+
+function looksLikeFilePath(value: string): boolean {
+	return value.startsWith("/") || value.startsWith("\\") || value.includes("://");
 }
 
 // ─── Dispatch ───
@@ -1605,6 +1742,8 @@ async function dispatch(cmd: Command): Promise<Response> {
 	switch (cmd.cmd) {
 		case "devices":
 			return handleDevices(cmd.args);
+		case "apps":
+			return handleApps(cmd.args);
 		case "open":
 			return handleOpen(cmd.args, sessionName);
 		case "attach-lldb":

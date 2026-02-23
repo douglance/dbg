@@ -84,17 +84,27 @@ dbg devices
 dbg devices --platform ios
 ```
 
+List installed apps on a device:
+
+```sh
+dbg apps <device-id>
+```
+
 Attach to a running app by bundle id:
 
 ```sh
 dbg attach com.example.myapp
 ```
 
+If both a booted simulator and a booted physical device match, `dbg attach` now fails fast with an ambiguity error and asks you to choose `--device` explicitly.
+
 Launch (if not running) then attach:
 
 ```sh
 dbg attach com.example.myapp --launch
 ```
+
+On physical devices, if attach fails without `--launch`, dbg automatically retries with `--launch` for a debuggable session. After a `--launch` attach, dbg auto-continues past dyld into app code (lands at `main`).
 
 Force simulator vs physical device:
 
@@ -122,6 +132,8 @@ dbg attach com.example.myapp --attach-strategy gdb-remote
 | `dbg run "<command>"` | Spawn with `--inspect-brk`, connect automatically |
 | `dbg restart` | Kill, respawn, reconnect, restore all breakpoints |
 | `dbg status` | Connection state, pause state, location, PID |
+| `dbg devices` | List Apple devices and simulators |
+| `dbg apps <device-id>` | List installed apps on a device |
 
 ### Flow Control
 
@@ -261,6 +273,7 @@ dbg q "SELECT ts, source, method FROM events WHERE category = 'cdp' ORDER BY id 
 All debugger activity is recorded to a SQLite database for post-hoc analysis and diagnostics.
 
 - **Location**: `/tmp/dbg-events.db` (override with `DBG_EVENTS_DB` env var)
+  - If default paths are unhealthy and no `DBG_SOCK`/`DBG_EVENTS_DB` overrides are set, dbg automatically retries with deterministic per-user/per-repo fallback paths under `/tmp`.
 - **Format**: SQLite with WAL mode, async batched writes (~100ms flush interval)
 - **Categories**: `daemon` (lifecycle), `connection` (connect/disconnect/reconnect), `cdp` (protocol messages)
 - **Session tracking**: Each connection gets a unique session ID for correlation
@@ -292,7 +305,7 @@ caller        CLI              daemon            target
   │            exit               │                 │
 ```
 
-The CLI is a thin client. It connects to a background daemon over a Unix socket (`/tmp/dbg.sock`), sends one command, receives one response, prints it, and exits. The daemon holds the persistent Chrome DevTools Protocol connection to the target.
+The CLI is a thin client. It connects to a background daemon over a Unix socket (default `/tmp/dbg.sock`), sends one command, receives one response, prints it, and exits. If the default socket/db path is unhealthy, it auto-retries with a deterministic per-user/per-repo fallback path (unless `DBG_SOCK`/`DBG_EVENTS_DB` are explicitly set). The daemon holds the persistent Chrome DevTools Protocol connection to the target.
 
 The daemon also maintains an **event store** (SQLite) that records every CDP message, connection event, and lifecycle action. This enables the `trace`, `health`, and event log query tables without adding state to the CLI.
 
@@ -304,7 +317,12 @@ Works with any target that speaks the V8 Inspector Protocol:
 - Deno (`--inspect`)
 - Any V8-based runtime with an inspector
 
-Domain enabling is timeout-resilient — targets that don't implement all CDP domains (like embedded V8 runtimes) connect gracefully with reduced functionality.
+And native targets via LLDB DAP:
+
+- iOS, tvOS, watchOS, visionOS apps on physical devices and simulators
+- Local native binaries via `dbg attach-lldb`
+
+Domain enabling is timeout-resilient — targets that don't implement all CDP domains (like embedded V8 runtimes) connect gracefully with reduced functionality. Native sessions handle adapter disconnections gracefully (e.g., `registers` on physical devices returns a friendly error instead of crashing the session).
 
 ## License
 

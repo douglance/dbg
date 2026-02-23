@@ -86,6 +86,7 @@ export const providerErrorSchema: Record<string, unknown> = {
 			enum: [
 				"invalid_request",
 				"device_not_found",
+				"ambiguous_device_selection",
 				"app_not_installed",
 				"process_not_running",
 				"attach_denied_or_timeout",

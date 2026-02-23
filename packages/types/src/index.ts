@@ -40,6 +40,7 @@ export interface ProviderResolutionResult {
 export type ProviderErrorCode =
 	| "invalid_request"
 	| "device_not_found"
+	| "ambiguous_device_selection"
 	| "app_not_installed"
 	| "process_not_running"
 	| "attach_denied_or_timeout"
@@ -120,6 +121,7 @@ export type Command = { s?: string } & (
 	| { cmd: "attach"; args: string }
 	| { cmd: "attach-lldb"; args: string }
 	| { cmd: "devices"; args?: string }
+	| { cmd: "apps"; args: string }
 	| { cmd: "close" }
 	| { cmd: "run"; args: string }
 	| { cmd: "restart" }
@@ -298,6 +300,7 @@ export interface CallFrameInfo {
 	scriptId: string;
 	scopeChain: ScopeInfo[];
 	thisObjectId: string;
+	instructionAddress?: string;
 }
 
 export interface ScopeInfo {

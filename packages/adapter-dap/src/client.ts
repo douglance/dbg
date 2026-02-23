@@ -37,6 +37,7 @@ export interface LldbAttachToPidOptions extends LldbLaunchOptions {
 	waitFor?: boolean;
 	attachCommands?: string[];
 	requestTimeoutMs?: number;
+	startedStopped?: boolean;
 }
 
 export interface LldbGdbRemoteOptions extends LldbLaunchOptions {
@@ -173,8 +174,15 @@ export class DapClientWrapper implements DebugExecutor {
 				attachRequest.waitFor = options.waitFor ?? false;
 			}
 			// lldb-dap uses this configuration timeout (seconds) when waiting for the
-			// attached process to reach a stopped state.
-			attachRequest.timeout = Math.max(1, Math.ceil(requestTimeoutMs / 1000));
+			// attached process to reach a stopped state. When the process was launched
+			// with --start-stopped, it's already suspended so use a shorter internal
+			// timeout. For regular attaches, use the full timeout to give LLDB time
+			// to interrupt the running process.
+			const lldbTimeoutSec =
+				usingAttachCommands && options.startedStopped
+					? Math.max(1, Math.min(15, Math.ceil(requestTimeoutMs / 2000)))
+					: Math.max(1, Math.ceil(requestTimeoutMs / 1000));
+			attachRequest.timeout = lldbTimeoutSec;
 
 			let needsExplicitPause = false;
 			try {
@@ -208,14 +216,28 @@ export class DapClientWrapper implements DebugExecutor {
 			this.state.connected = true;
 
 			if (needsExplicitPause) {
+				// Physical device module loading can take 30-60s for large apps.
+				// Use the full request timeout for the recovery pause.
 				await this.requestWithTimeout(
 					"pause",
 					{ threadId: 0 },
-					DEFAULT_REQUEST_TIMEOUT_MS,
+					requestTimeoutMs,
 				);
 			}
 
 			await this.waitForPaused(ATTACH_PAUSE_TIMEOUT_MS, 1);
+
+			// CoreDevice attach to --start-stopped processes: LLDB briefly reports
+			// stopped then auto-continues via configurationDone. Re-pause to get
+			// a debuggable stopped state with real stack frames.
+			if (!this.state.paused) {
+				await this.requestWithTimeout(
+					"pause",
+					{ threadId: 0 },
+					requestTimeoutMs,
+				);
+				await this.waitForPaused(ATTACH_PAUSE_TIMEOUT_MS);
+			}
 		} catch (error) {
 			const message = errorMessage(error);
 			this.setFatalError("DAP_ATTACH_FAILED", message);
@@ -273,6 +295,77 @@ export class DapClientWrapper implements DebugExecutor {
 			this.setFatalError("DAP_ATTACH_FAILED", message);
 			await this.safeCloseTransport();
 			throw new DapClientError("DAP_ATTACH_FAILED", message);
+		}
+	}
+
+	async continueToMain(
+		timeoutMs = 10000,
+	): Promise<{ hitMain: boolean; location?: { file: string; line: number; function: string } }> {
+		if (!this.transport || !this.state.connected) {
+			return { hitMain: false };
+		}
+
+		// Set a function breakpoint on main
+		try {
+			await this.requestWithTimeout(
+				"setFunctionBreakpoints",
+				{ breakpoints: [{ name: "main" }] },
+				DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+		} catch {
+			return { hitMain: false };
+		}
+
+		// Continue and wait for the breakpoint hit
+		try {
+			const waitP = this.waitForPaused(timeoutMs, this.dapState.stopEpoch + 1);
+			await this.requestWithTimeout(
+				"continue",
+				{ threadId: this.requireThreadId() },
+				DEFAULT_REQUEST_TIMEOUT_MS,
+			);
+			await waitP;
+
+			// Clean up the function breakpoint
+			try {
+				await this.requestWithTimeout(
+					"setFunctionBreakpoints",
+					{ breakpoints: [] },
+					DEFAULT_REQUEST_TIMEOUT_MS,
+				);
+			} catch {
+				// ignore cleanup errors
+			}
+
+			const frame = this.state.callFrames[0];
+			return {
+				hitMain: true,
+				location: frame
+					? { file: frame.file, line: frame.line, function: frame.functionName }
+					: undefined,
+			};
+		} catch {
+			// Timeout or error — interrupt and clean up
+			try {
+				await this.requestWithTimeout(
+					"pause",
+					{ threadId: this.requireThreadId() },
+					5000,
+				);
+				await this.waitForPaused(5000);
+			} catch {
+				// ignore recovery errors
+			}
+			try {
+				await this.requestWithTimeout(
+					"setFunctionBreakpoints",
+					{ breakpoints: [] },
+					DEFAULT_REQUEST_TIMEOUT_MS,
+				);
+			} catch {
+				// ignore cleanup errors
+			}
+			return { hitMain: false };
 		}
 	}
 
@@ -665,6 +758,7 @@ export class DapClientWrapper implements DebugExecutor {
 				scriptId,
 				scopeChain: scopes,
 				thisObjectId: "",
+				instructionAddress: frame.instructionPointerReference || undefined,
 			});
 		}
 

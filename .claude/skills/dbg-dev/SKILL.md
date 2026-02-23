@@ -48,13 +48,13 @@ CLI (packages/cli/src/cli.ts)
 | Package | Key Files | Purpose |
 |---|---|---|
 | `@dbg/cli` | `src/cli.ts` | CLI entry, argv parsing, daemon communication |
-| | `src/daemon.ts` | Long-running process, session registry, protocol dispatch |
+| | `src/daemon.ts` | Long-running process, session registry, protocol dispatch (includes `handleApps`, auto-retry with `--launch`, `continueToMain` integration) |
 | | `src/commands.ts` | Command implementations (breakpoints, stepping, eval) |
 | | `src/format.ts` | TSV/JSON output formatting |
 | | `src/process.ts` | Managed child process spawning |
 | `@dbg/adapter-cdp` | `src/client.ts` | CDP websocket client, method dispatch |
 | | `src/discovery.ts` | Target discovery via `/json` endpoint |
-| `@dbg/adapter-dap` | `src/client.ts` | DAP client |
+| `@dbg/adapter-dap` | `src/client.ts` | DAP client (`continueToMain()` for auto-continue past dyld) |
 | | `src/transport.ts` | DAP stream transport |
 | | `src/launch.ts` | DAP launch/attach configuration |
 | `@dbg/query` | `src/parser.ts` | SQL parser |

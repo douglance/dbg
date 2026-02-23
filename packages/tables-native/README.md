@@ -10,7 +10,7 @@ Native debug virtual tables for the dbg SQL query engine. Only available for DAP
 
 | Table | Description | Key Columns |
 |---|---|---|
-| `registers` | CPU register values | `group`, `name`, `value` |
+| `registers` | CPU register values (graceful error on physical device disconnect) | `group`, `name`, `value` |
 | `memory` | Process memory (requires `WHERE address=` and `length=`) | `offset`, `hex`, `ascii` |
 | `disassembly` | Disassembled instructions (requires `WHERE address=`) | `address`, `instruction`, `operands`, `comment` |
 | `threads` | Active threads | `id`, `name`, `stopped` |

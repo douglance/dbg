@@ -11,6 +11,7 @@ Debug Adapter Protocol (DAP) client for LLDB. Spawns `lldb-dap`, communicates ov
   - `attachLldbGdbRemote(options)`: Attach via gdb-remote protocol (port + optional PID).
   - `send(method, params?)`: Translate CDP-style method names to DAP requests (e.g., `Debugger.resume` -> `continue`).
   - `waitForPaused(timeoutMs?, minStopEpoch?)`: Promise that resolves on the next stopped event.
+  - `continueToMain(timeoutMs?)`: Set a function breakpoint on `main`, continue, and land in app code. Returns `{ hitMain, location? }`. Used after `--launch` attach to skip past dyld.
   - `disconnect()`: Send DAP disconnect, kill transport.
   - `getPhase()`: Current `DapSessionPhase` (starting, configuring, paused, running, terminated, error).
   - `getLastError()`: Last fatal error info.

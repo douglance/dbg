@@ -44,6 +44,14 @@ describe("provider simctl helpers", () => {
 							isAvailable: true,
 						},
 					],
+					"com.apple.CoreSimulator.SimRuntime.xrOS-2-1": [
+						{
+							udid: "SIM-3",
+							name: "Apple Vision Pro (xrOS)",
+							state: "Booted",
+							isAvailable: true,
+						},
+					],
 				},
 			}),
 		);
@@ -65,6 +73,14 @@ describe("provider simctl helpers", () => {
 				isAvailable: true,
 				platform: "visionos",
 				runtime: "com.apple.CoreSimulator.SimRuntime.visionOS-2-0",
+			},
+			{
+				identifier: "SIM-3",
+				name: "Apple Vision Pro (xrOS)",
+				state: "booted",
+				isAvailable: true,
+				platform: "visionos",
+				runtime: "com.apple.CoreSimulator.SimRuntime.xrOS-2-1",
 			},
 		]);
 	});

@@ -14,13 +14,13 @@ Shared TypeScript types and constants used across all dbg packages.
 - `SessionCapabilities`: Feature flags (breakpoints, stepping, dom, registers, etc.) per session type.
 - `EventStoreLike`: Interface for the event store (query + record).
 - `DebugExecutor`: Unified interface for sending debug commands (CDP or DAP).
-- `Command`: Discriminated union of all CLI-to-daemon wire protocol commands.
+- `Command`: Discriminated union of all CLI-to-daemon wire protocol commands (includes `apps`, `devices`, `attach`, flow control, etc.).
 - `Response`, `OkResponse`, `ErrResponse`: Daemon-to-CLI response types.
 - `DebuggerState` (alias `DaemonState`): Full debugger state (connected, paused, callFrames, scripts, breakpoints, console, exceptions, cdp/dap substates).
 - `Session`, `SessionInfo`: Runtime session and its serializable info.
 - `CDP_CAPABILITIES`, `DAP_CAPABILITIES`: Default capability sets for each protocol.
 - `createEmptyDebuggerState()`: Factory for a fresh `DebuggerState`.
-- Supporting interfaces: `CallFrameInfo`, `ScopeInfo`, `AsyncFrameInfo`, `StoredBreakpoint`, `ScriptInfo`, `ConsoleEntry`, `ExceptionEntry`, `NetworkRequest`, `PageEvent`, `WebSocketFrame`, `CoverageSnapshot`, `ThreadInfo`, `RegisterGroup`, `ModuleInfo`, `DapStopInfo`, `DapErrorInfo`, `CdpState`, `DapState`.
+- Supporting interfaces: `CallFrameInfo` (with optional `instructionAddress` for DAP frames), `ScopeInfo`, `AsyncFrameInfo`, `StoredBreakpoint`, `ScriptInfo`, `ConsoleEntry`, `ExceptionEntry`, `NetworkRequest`, `PageEvent`, `WebSocketFrame`, `CoverageSnapshot`, `ThreadInfo`, `RegisterGroup`, `ModuleInfo`, `DapStopInfo`, `DapErrorInfo`, `CdpState`, `DapState`.
 
 ## Dependencies
 

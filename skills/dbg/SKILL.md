@@ -5,12 +5,12 @@ context: fork
 license: MIT
 metadata:
   author: douglance
-  version: 0.2.0
+  version: 0.3.0
 ---
 
 # dbg - Stateless Debugger & Browser Automation
 
-Debug Node.js processes programmatically. Every `dbg` invocation is stateless: one command in, one response out, exit. A background daemon holds the CDP connection between calls.
+Debug Node.js processes and native apps programmatically. Every `dbg` invocation is stateless: one command in, one response out, exit. A background daemon holds the CDP/DAP connection between calls.
 
 ## When to Use
 
@@ -166,6 +166,32 @@ dbg coverage stop
 dbg q "SELECT url, used_pct FROM coverage ORDER BY used_pct ASC"
 ```
 
+### Apple Device / Simulator (iOS, tvOS, watchOS, visionOS)
+
+```sh
+dbg devices                            # list all devices + simulators
+dbg devices --platform ios             # filter by platform
+dbg apps <device-id>                   # list installed apps on a device
+dbg attach com.example.myapp           # attach to running app
+dbg attach com.example.myapp --launch  # launch app then attach
+dbg attach com.example.myapp --device sim:"iPhone 15" --launch
+dbg attach com.example.myapp --device device:<udid> --launch
+```
+
+On physical devices, if attach fails without `--launch`, dbg automatically retries with `--launch`. After a `--launch` attach, dbg auto-continues past dyld into app code (lands at `main`).
+
+### Native Debug (LLDB Sessions)
+
+```sh
+dbg attach-lldb ./a.out                # launch local binary via lldb-dap
+dbg registers                          # show CPU registers
+dbg memory <addr> <len>                # read process memory
+dbg disasm                             # disassemble at current location
+dbg disasm <addr>                      # disassemble at specific address
+```
+
+Note: `registers` on physical devices returns a friendly error instead of crashing the session if the adapter disconnects.
+
 ### Target Management
 
 ```sh
@@ -216,7 +242,19 @@ dbg q "SELECT ts, stream, method, summary FROM timeline WHERE detail = 'full' AN
 
 Event-backed tables (`events`, `cdp`, `connections`, `timeline`) can be queried even when no debug session is active.
 
-### Browser Tables
+#### Native Tables (LLDB/DAP Sessions)
+
+| Table | Description | Required Filter |
+|---|---|---|
+| `registers` | CPU register values | — |
+| `memory` | Process memory bytes | `address`, `length` |
+| `disassembly` | Disassembled instructions | `address` |
+| `threads` | Active threads | — |
+| `modules` | Loaded modules/libraries | — |
+| `watchpoints` | Hardware watchpoints | — |
+| `signals` | Signal information | — |
+
+## Browser Tables
 
 | Table | Description | Required Filter |
 |---|---|---|
@@ -316,12 +354,28 @@ dbg q "SELECT ts, stream, severity, method, summary FROM timeline ORDER BY ts DE
 dbg q "SELECT ts, method, error FROM cdp WHERE error != '' ORDER BY ts DESC LIMIT 100"
 ```
 
+## Native Device Debug Loop
+
+```sh
+# Scenario: Debug an iOS app on a physical device
+dbg devices --platform ios
+dbg apps <device-id>
+dbg attach com.example.myapp               # auto-retries with --launch if needed
+# Now paused in app code (main), not dyld
+dbg b ViewController.swift:42
+dbg c
+dbg q "SELECT name, value FROM vars WHERE frame_id = 0"
+dbg n
+dbg e "self.viewModel.state"
+dbg close
+```
+
 ## Tips
 
 - Every `dbg` call is independent — no session to manage
 - Breakpoints persist across `dbg restart`
 - Use SQL WHERE clauses to filter large result sets
-- `dbg trace` shows CDP latency to diagnose slow operations
+- `dbg trace` shows CDP/DAP latency to diagnose slow operations
 - `dbg health` quickly verifies the target is responsive
 - `dbg reconnect` recovers from dropped websocket connections
 - For browser pages, use `dbg open <port> --type page` to skip Node.js targets
@@ -329,6 +383,9 @@ dbg q "SELECT ts, method, error FROM cdp WHERE error != '' ORDER BY ts DESC LIMI
 - Network mocks survive page reload (Fetch domain stays enabled)
 - Screenshot returns base64 PNG — agents can "see" the page
 - Combine DOM queries + screenshots for both structural and visual verification
+- Physical device attach auto-retries with `--launch` if needed
+- After `--launch`, dbg auto-continues past dyld to `main`
+- `registers` on physical devices fails gracefully (no session crash)
 
 ## Success Criteria
 

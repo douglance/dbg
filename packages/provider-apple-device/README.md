@@ -8,6 +8,7 @@ Apple device/simulator provider that resolves attach targets across iOS, tvOS, w
 - `resolveAppleDeviceAttachTarget(request)`: Main entry point. Takes an `AttachRequest`, resolves device + process, returns `ProviderResolutionResult`.
 - `resolveAppleAttachTarget(request)`: Lower-level resolver (called by the above).
 - `listAppleAttachTargets(platform?)`: List available devices and simulators as attach candidates (for `dbg devices`).
+- `listApps(deviceId)`: List installed apps on a device. Returns `AppRecord[]` with `bundleIdentifier`, `name`, `url`.
 - `parseAttachRequest(json)`: Parse and validate a JSON attach request string.
 
 ### Device Discovery (`apple.ts`, `simctl.ts`, `devicectl.ts`)
@@ -30,13 +31,15 @@ The `--device` flag supports:
 - `device:<udid-or-name>` -- match physical device by UDID or name
 - `<udid>` -- auto-detect simulator or device
 
+If both booted simulator and physical candidates exist and `--device` is omitted, resolution returns `ambiguous_device_selection` with suggested selector commands.
+
 ## Dependencies
 
 - `@dbg/types` (internal) -- `AttachRequest`, `ProviderResolutionResult`, `ProviderError`
 
 ## Dependents
 
-- `@dbg/cli` -- used by daemon for `attach` and `devices` commands
+- `@dbg/cli` -- used by daemon for `attach`, `devices`, and `apps` commands
 
 ## Testing
 

@@ -1,4 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -6,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const CLI = path.resolve(__dirname, "../packages/cli/dist/cli.js");
 const SOCKET_PATH = "/tmp/dbg-test.sock";
+const DEFAULT_SOCKET_PATH = "/tmp/dbg.sock";
 const TARGET = path.resolve(__dirname, "fixtures/target.js");
 const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-events.db");
 
@@ -51,6 +53,16 @@ function findFreePort(): Promise<number> {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fallbackPathsForCwd(cwd: string): { socket: string; eventsDb: string } {
+	const uid =
+		typeof process.getuid === "function" ? String(process.getuid()) : "0";
+	const repoHash = createHash("sha1").update(cwd).digest("hex").slice(0, 10);
+	return {
+		socket: `/tmp/dbg-${uid}-${repoHash}.sock`,
+		eventsDb: `/tmp/dbg-${uid}-${repoHash}-events.db`,
+	};
 }
 
 function killDaemon(): void {
@@ -303,6 +315,96 @@ describe("integration", () => {
 				fs.unlinkSync(customSocket);
 			} catch {
 				// ignore
+			}
+		}
+	});
+
+	it("falls back to deterministic per-repo socket/db when default socket is unhealthy", async () => {
+		if (fs.existsSync(DEFAULT_SOCKET_PATH)) {
+			// Respect existing local daemon/socket and avoid mutating user state.
+			return;
+		}
+
+		const fakeServer = net.createServer((socket) => {
+			socket.write("not-json\n");
+			socket.end();
+		});
+		await new Promise<void>((resolve, reject) => {
+			fakeServer.once("error", reject);
+			fakeServer.listen(DEFAULT_SOCKET_PATH, resolve);
+		});
+
+		const fallback = fallbackPathsForCwd(process.cwd());
+
+		try {
+			const statusRun = await new Promise<{
+				stdout: string;
+				stderr: string;
+				exitCode: number;
+			}>((resolve, reject) => {
+				const proc = spawn(process.execPath, [CLI, "status"], {
+					env: {
+						...process.env,
+						DBG_SOCK: "",
+						DBG_EVENTS_DB: "",
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				let stdout = "";
+				let stderr = "";
+				const timeout = setTimeout(() => {
+					proc.kill("SIGKILL");
+					reject(new Error("status command timed out"));
+				}, 15000);
+				proc.stdout?.on("data", (chunk: Buffer) => {
+					stdout += chunk.toString();
+				});
+				proc.stderr?.on("data", (chunk: Buffer) => {
+					stderr += chunk.toString();
+				});
+				proc.once("error", (err) => {
+					clearTimeout(timeout);
+					reject(err);
+				});
+				proc.once("close", (code) => {
+					clearTimeout(timeout);
+					resolve({
+						stdout,
+						stderr,
+						exitCode: code ?? 1,
+					});
+				});
+			});
+			expect(statusRun.exitCode).toBe(0);
+			expect(statusRun.stderr).toBe("");
+			expect(statusRun.stdout).toContain("disconnected");
+			expect(fs.existsSync(fallback.socket)).toBe(true);
+		} finally {
+			fakeServer.close();
+			try {
+				fs.unlinkSync(DEFAULT_SOCKET_PATH);
+			} catch {
+				// ignore
+			}
+			try {
+				execFileSync(process.execPath, [CLI, "close"], {
+					encoding: "utf8",
+					timeout: 5000,
+					env: {
+						...process.env,
+						DBG_SOCK: fallback.socket,
+						DBG_EVENTS_DB: fallback.eventsDb,
+					},
+				});
+			} catch {
+				// ignore
+			}
+			for (const suffix of ["", "-wal", "-shm"]) {
+				try {
+					fs.unlinkSync(fallback.eventsDb + suffix);
+				} catch {
+					// ignore
+				}
 			}
 		}
 	});
