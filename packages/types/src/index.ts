@@ -116,47 +116,159 @@ export interface DebugExecutor {
 export type CdpExecutor = DebugExecutor;
 
 // CLI <-> Daemon wire protocol
-export type Command = { s?: string } & (
-	| { cmd: "open"; args: string }
-	| { cmd: "attach"; args: string }
-	| { cmd: "attach-lldb"; args: string }
-	| { cmd: "devices"; args?: string }
-	| { cmd: "apps"; args: string }
-	| { cmd: "close" }
-	| { cmd: "run"; args: string }
-	| { cmd: "restart" }
-	| { cmd: "status" }
-	| { cmd: "c" }
-	| { cmd: "s" }
-	| { cmd: "n" }
-	| { cmd: "o" }
-	| { cmd: "pause" }
-	| { cmd: "b"; args: string }
-	| { cmd: "db"; args: string }
-	| { cmd: "bl" }
-	| { cmd: "e"; args: string }
-	| { cmd: "src"; args?: string }
-	| { cmd: "trace"; args?: string }
-	| { cmd: "health" }
-	| { cmd: "reconnect" }
-	| { cmd: "q"; args: string }
+//
+// Each Command variant carries typed, already-parsed payload fields so the
+// daemon never has to re-parse a freeform string. A `session?: string`
+// field identifies the target debug session for any command where a
+// session context is meaningful. Commands that operate outside any
+// session (session management itself, target/device enumeration) omit
+// `session` — see inline comments on each variant.
+export type SessionScoped<T> = T & { session?: string };
+
+export type NavigateAction =
+	| { action: "reload" }
+	| { action: "back" }
+	| { action: "forward" }
+	| { action: "url"; url: string };
+
+export type CoverageAction = "start" | "stop";
+
+export type Command =
+	// ─── Lifecycle ───
+	// Connect to a running debug target by port (auto-discover websocket).
+	| SessionScoped<{
+			cmd: "open";
+			port: number;
+			host?: string;
+			type?: "page" | "node";
+			target?: string;
+	  }>
+	// Attach to an app on an Apple device/simulator via a provider.
+	| SessionScoped<{
+			cmd: "attach";
+			provider: AttachProvider;
+			platform: AttachPlatform;
+			bundleId: string;
+			device?: string;
+			pid?: number;
+			launch?: boolean;
+			attachStrategy?: AttachStrategy;
+			attachTimeoutMs?: number;
+			verbose?: boolean;
+	  }>
+	// Launch lldb-dap against a local native binary.
+	| SessionScoped<{ cmd: "attach-lldb"; program: string; args?: string[] }>
+	// Disconnect the session (and kill any managed child process).
+	| SessionScoped<{ cmd: "close" }>
+	// Spawn a Node process with --inspect-brk and attach.
+	| SessionScoped<{ cmd: "run"; command: string }>
+	// Kill and respawn the managed child, reconnect, re-apply breakpoints.
+	| SessionScoped<{ cmd: "restart" }>
+	// Connection/pause state snapshot for the session.
+	| SessionScoped<{ cmd: "status" }>
+
+	// ─── Flow control ───
+	// Continue execution.
+	| SessionScoped<{ cmd: "c" }>
+	// Step into.
+	| SessionScoped<{ cmd: "s" }>
+	// Step over.
+	| SessionScoped<{ cmd: "n" }>
+	// Step out.
+	| SessionScoped<{ cmd: "o" }>
+	// Pause execution.
+	| SessionScoped<{ cmd: "pause" }>
+
+	// ─── Breakpoints ───
+	// Set a breakpoint by file:line with an optional condition expression.
+	| SessionScoped<{
+			cmd: "b";
+			file: string;
+			line: number;
+			condition?: string;
+	  }>
+	// Delete a breakpoint by its debugger-assigned id.
+	| SessionScoped<{ cmd: "db"; id: string }>
+	// List all breakpoints for the session.
+	| SessionScoped<{ cmd: "bl" }>
+
+	// ─── Inspection ───
+	// Evaluate an expression in the current frame.
+	| SessionScoped<{ cmd: "e"; expression: string }>
+	// View source. If file is omitted, uses the current paused frame;
+	// otherwise all three (file, start, end) must be provided.
+	| SessionScoped<{
+			cmd: "src";
+			file?: string;
+			start?: number;
+			end?: number;
+	  }>
+	// Recent protocol send/recv history from the event store.
+	| SessionScoped<{ cmd: "trace"; limit?: number }>
+	// Probe Runtime.evaluate("1+1") and report latency.
+	| SessionScoped<{ cmd: "health" }>
+	// Reconnect to the last known websocket URL.
+	| SessionScoped<{ cmd: "reconnect" }>
+
+	// ─── Query ───
+	// Run a SQL query against the table registry for this session.
+	// JSON rendering (\j) is a CLI-side formatting concern and is not
+	// carried in the payload.
+	| SessionScoped<{ cmd: "q"; sql: string }>
+
+	// ─── Sessions ───
+	// Global: list all sessions. No `session` field (operates on the registry).
 	| { cmd: "ss" }
-	| { cmd: "use"; args: string }
-	| { cmd: "navigate"; args: string }
-	| { cmd: "screenshot"; args?: string }
-	| { cmd: "click"; args: string }
-	| { cmd: "type"; args: string }
-	| { cmd: "select"; args: string }
-	| { cmd: "mock"; args: string }
-	| { cmd: "unmock"; args?: string }
-	| { cmd: "emulate"; args: string }
-	| { cmd: "throttle"; args: string }
-	| { cmd: "coverage"; args: string }
-	| { cmd: "targets"; args: string }
-	| { cmd: "registers" }
-	| { cmd: "memory"; args: string }
-	| { cmd: "disasm"; args?: string }
-);
+	// Global: switch the current session pointer. `name` is the session,
+	// not a target — no `session` field.
+	| { cmd: "use"; name: string }
+
+	// ─── Browser automation (CDP only) ───
+	// Navigate: url|reload|back|forward. Encoded as a discriminated sub-union.
+	| SessionScoped<{ cmd: "navigate"; action: NavigateAction }>
+	// Capture a PNG screenshot. If `path` is set, saves to disk; otherwise
+	// returns base64 in the response.
+	| SessionScoped<{ cmd: "screenshot"; path?: string }>
+	// Click an element by CSS selector.
+	| SessionScoped<{ cmd: "click"; selector: string }>
+	// Type text into an element.
+	| SessionScoped<{ cmd: "type"; selector: string; text: string }>
+	// Select a <select> option by value.
+	| SessionScoped<{ cmd: "select"; selector: string; value: string }>
+	// Register a network mock: urlPattern + response body + optional status.
+	| SessionScoped<{
+			cmd: "mock";
+			urlPattern: string;
+			body: string;
+			status?: number;
+	  }>
+	// Remove mock(s). Omit `pattern` to clear all.
+	| SessionScoped<{ cmd: "unmock"; pattern?: string }>
+	// Emulate a mobile device by preset name, or "reset" to clear.
+	| SessionScoped<{ cmd: "emulate"; preset: string }>
+	// Network throttling preset: 3g, slow-3g, fast-3g, 4g, offline, off.
+	| SessionScoped<{ cmd: "throttle"; preset: string }>
+	// Start/stop JS + CSS coverage tracking.
+	| SessionScoped<{ cmd: "coverage"; action: CoverageAction }>
+
+	// ─── Target/device enumeration (global) ───
+	// List debuggable targets at a port. No `session`: discovery endpoint.
+	| { cmd: "targets"; port: number; host?: string }
+	// List Apple devices + simulators. No `session`: global enumeration.
+	| {
+			cmd: "devices";
+			platform?: AttachPlatform;
+	  }
+	// List installed apps on an Apple device/simulator. No `session`.
+	| { cmd: "apps"; deviceId: string }
+
+	// ─── Native debug (DAP / LLDB only) ───
+	// Dump register values.
+	| SessionScoped<{ cmd: "registers" }>
+	// Read `length` bytes starting at `address` (hex or decimal string).
+	| SessionScoped<{ cmd: "memory"; address: string; length: number }>
+	// Disassemble around `address`, or the current frame when omitted.
+	| SessionScoped<{ cmd: "disasm"; address?: string }>;
 
 export interface OkResponse {
 	ok: true;

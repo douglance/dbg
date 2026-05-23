@@ -27,8 +27,7 @@ export const registersTable: VirtualTable = {
 				threadId: dapState?.threadId ?? undefined,
 			})) as typeof response;
 		} catch (error) {
-			const msg =
-				error instanceof Error ? error.message.toLowerCase() : "";
+			const msg = error instanceof Error ? error.message.toLowerCase() : "";
 			if (
 				msg.includes("transport") ||
 				msg.includes("closed") ||

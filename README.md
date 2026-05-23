@@ -21,7 +21,7 @@ Traditional debuggers are interactive. They assume a human is sitting at a termi
 **dbg** treats debugging as an API:
 
 - **Stateless CLI** — every call is independent. No session to manage.
-- **Machine-readable output** — TSV by default, JSON with `\j`. No color, no decoration, no unicode.
+- **Machine-readable output** — TOON (compact, token-efficient) by default, JSON with `--json`. No color, no decoration, no unicode.
 - **SQL query engine** — `SELECT name, value FROM vars WHERE frame_id = 0`. Sixteen virtual tables expose everything the debugger can see.
 - **Event store** — every CDP message, connection event, and daemon lifecycle action is logged to SQLite for post-hoc analysis.
 - **Background daemon** — a thin daemon holds the CDP connection between calls. The CLI is just a client.
@@ -50,9 +50,9 @@ Attach to a running process:
 ```sh
 node --inspect-brk app.ts &
 dbg open 9229
-dbg status                    # connected  paused  app.ts:1  (anonymous)
+dbg status                    # ok: true, connected: true, status: paused, file: app.ts, line: 1
 dbg b app.ts:42
-dbg c                         # paused  app.ts  42  handleRequest
+dbg c                         # ok: true, status: paused, file: app.ts, line: 42, function: handleRequest
 dbg q "SELECT name, value FROM vars WHERE frame_id = 0"
 dbg close
 ```
@@ -145,19 +145,24 @@ dbg attach com.example.myapp --attach-strategy gdb-remote
 | `dbg o` | Step out |
 | `dbg pause` | Pause execution |
 
-All flow commands output a single line:
+All flow commands output a structured result:
 
 ```
-paused	app.ts	42	handleRequest
+ok: true
+status: paused
+file: app.ts
+line: 42
+function: handleRequest
 ```
 
-Or `running` if no breakpoint was hit.
+Or `status: running` if no breakpoint was hit. Pass `--json` to receive the
+same payload as JSON.
 
 ### Breakpoints
 
 ```sh
 dbg b app.ts:42               # set
-dbg b app.ts:42 if x > 0      # conditional
+dbg b app.ts:42 --if "x > 0"  # conditional
 dbg db <id>                   # delete
 dbg bl                        # list all
 ```
@@ -238,18 +243,22 @@ Tables marked with required filters (`props`, `proto`, `source`, `listeners`) wi
 ```sh
 # Get the object_id
 dbg q "SELECT name, object_id FROM vars WHERE name = 'config'"
-# name    object_id
-# config  1234
+# ok: true
+# columns[2]: name,object_id
+# rows[1]:
+#   - [2]: config,1234
 
 # Inspect its properties
 dbg q "SELECT name, type, value FROM props WHERE object_id = '1234'"
-# name    type     value
-# port    number   3000
-# debug   boolean  true
-# nested  object   [Object]
+# ok: true
+# columns[3]: name,type,value
+# rows[3]:
+#   - [3]: port,number,3000
+#   - [3]: debug,boolean,true
+#   - [3]: nested,object,[Object]
 
-# Keep going
-dbg q "SELECT name, value FROM props WHERE object_id = '5678'"
+# Keep going (or add --json for easy parsing)
+dbg q "SELECT name, value FROM props WHERE object_id = '5678'" --json
 ```
 
 #### Event Log Queries
@@ -282,12 +291,13 @@ The event store powers the `events`, `cdp`/`cdp_messages`, and `connections` vir
 
 ## Output Format
 
-- **TSV** for tabular data. Header row, tab-delimited.
-- **Bare values** for eval. Single line.
-- **Single status line** for flow commands.
-- **JSON** mode: append `\j` to any query — `dbg q "SELECT * FROM frames\j"`
-- **stdout** for data, **stderr** for errors.
-- **Exit 0** on success, **1** on error.
+- **TOON** (compact, token-efficient) by default for every command.
+- **JSON** with `--json`, or pick a format explicitly via `--format toon|json|yaml|md|jsonl`.
+- **stdout** for data and errors. **Exit 0** on success, **1** on error.
+
+TOON is a YAML-like encoding that is roughly half the tokens of equivalent JSON
+while staying trivial for a script to parse. Use `--json` when you want to pipe
+output into another tool.
 
 No color. No decoration. Designed to be parsed.
 

@@ -192,10 +192,7 @@ export class DapClientWrapper implements DebugExecutor {
 					requestTimeoutMs,
 				);
 			} catch (attachError) {
-				if (
-					usingAttachCommands &&
-					isProcessFailedToStopError(attachError)
-				) {
+				if (usingAttachCommands && isProcessFailedToStopError(attachError)) {
 					// Physical device (CoreDevice) attach: LLDB connects and loads modules
 					// but the process stays running, so lldb-dap reports "failed to stop".
 					// The DAP session is functional — recover by sending an explicit pause.
@@ -298,9 +295,10 @@ export class DapClientWrapper implements DebugExecutor {
 		}
 	}
 
-	async continueToMain(
-		timeoutMs = 10000,
-	): Promise<{ hitMain: boolean; location?: { file: string; line: number; function: string } }> {
+	async continueToMain(timeoutMs = 10000): Promise<{
+		hitMain: boolean;
+		location?: { file: string; line: number; function: string };
+	}> {
 		if (!this.transport || !this.state.connected) {
 			return { hitMain: false };
 		}

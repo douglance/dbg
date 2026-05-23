@@ -19,7 +19,7 @@
     "format": "biome format --write packages test",
     "check": "tsc --noEmit",
     "format:check": "biome format --error-on-warnings packages test",
-    "ci": "pnpm run lint && pnpm run format:check && pnpm run check && pnpm run build && pnpm run test"
+    "ci": "pnpm run lint && pnpm run format:check && pnpm run check && pnpm run test"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

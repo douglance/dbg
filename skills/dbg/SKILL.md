@@ -37,10 +37,10 @@ dbg run "node <file>"           # spawn with --inspect-brk, connect
 ### Set Breakpoints
 
 ```sh
-dbg b <file>:<line>             # set breakpoint
-dbg b <file>:<line> if <cond>   # conditional breakpoint
-dbg bl                          # list all breakpoints
-dbg db <id>                     # delete breakpoint
+dbg b <file>:<line>                  # set breakpoint
+dbg b <file>:<line> --if "<cond>"    # conditional breakpoint
+dbg bl                               # list all breakpoints
+dbg db <id>                          # delete breakpoint
 ```
 
 ### Control Execution
@@ -96,12 +96,13 @@ dbg close                       # disconnect (kills target if started via run)
 ### Multi-Session (Frontend + Backend)
 
 ```sh
-dbg run "node server.ts"               # auto-named s0
-dbg open 9222 --type page fe           # named "fe", targets browser tab
-dbg @be b server.ts:42                 # breakpoint on backend
-dbg @fe navigate "http://localhost:3000/login"
-dbg @fe q "SELECT * FROM console WHERE type = 'error'"
-dbg @be q "SELECT * FROM vars"
+dbg run "node server.ts"                             # auto-named s0
+dbg open 9229 be                                     # positional name (backend)
+dbg open 9222 fe --type page                        # named "fe", targets browser tab
+dbg b server.ts:42 --session be                      # breakpoint on backend
+dbg navigate "http://localhost:3000/login" --session fe
+dbg q "SELECT * FROM console WHERE type = 'error'" --session fe
+dbg q "SELECT * FROM vars" --session be
 ```
 
 ### Browser Navigation
@@ -284,10 +285,10 @@ dbg q "SELECT key, value FROM storage WHERE type = 'local'"
 
 ## Output Format
 
-- **TSV** by default (tab-separated, header row)
-- **JSON**: append `\j` — `dbg q "SELECT * FROM frames\j"`
-- **Bare values** for `dbg e` output
-- **Single status line** for flow commands
+- **TOON** (compact, token-efficient) by default for every command
+- **JSON**: `dbg q "SELECT * FROM frames" --json` (or `--format json`)
+- `--format toon|json|yaml|md|jsonl` picks the encoding explicitly
+- Flow commands return a structured object (`status: paused`, `file`, `line`, `function`)
 - **Exit 0** success, **1** error. Parse stdout, check exit code.
 
 ## Object Drill-Down Pattern
@@ -324,12 +325,12 @@ dbg close
 # Scenario: Login page is broken
 dbg open 9222 --type page
 dbg navigate "http://localhost:3000/login"
-dbg q "SELECT type, text FROM console WHERE type = 'error' \j"
-dbg q "SELECT method, status, url FROM network WHERE status >= 400 \j"
-dbg q "SELECT node_id, text FROM dom WHERE selector = '.error-message' \j"
+dbg q "SELECT type, text FROM console WHERE type = 'error'" --json
+dbg q "SELECT method, status, url FROM network WHERE status >= 400" --json
+dbg q "SELECT node_id, text FROM dom WHERE selector = '.error-message'" --json
 # ... identify and fix the bug in code ...
 dbg navigate reload
-dbg q "SELECT * FROM console WHERE type = 'error' \j"
+dbg q "SELECT * FROM console WHERE type = 'error'" --json
 dbg screenshot /tmp/login-fixed.png
 # Verify: zero errors, page renders correctly
 dbg close

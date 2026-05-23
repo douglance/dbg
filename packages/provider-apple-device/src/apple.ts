@@ -388,7 +388,8 @@ function resolveCandidates(
 	}
 
 	const booted = all.filter((candidate) => candidate.booted);
-	const preferred = booted.length > 0 ? sortCandidates(booted) : sortCandidates(all);
+	const preferred =
+		booted.length > 0 ? sortCandidates(booted) : sortCandidates(all);
 	if (hasMixedTargetKinds(preferred)) {
 		throw new AppleDeviceProviderError(
 			"ambiguous_device_selection",
@@ -396,7 +397,7 @@ function resolveCandidates(
 			{
 				availableDevices: preferred.map(describeCandidate),
 				suggestedCommands: buildDeviceSelectionSuggestions(preferred),
-				hint: "Specify --device sim:\"<name>\" or --device device:<udid-or-name> to choose the target environment.",
+				hint: 'Specify --device sim:"<name>" or --device device:<udid-or-name> to choose the target environment.',
 			},
 		);
 	}
@@ -693,7 +694,9 @@ function buildAmbiguousSelectionMessage(platform: AttachPlatform): string {
 	return `multiple booted ${platform} targets found across simulator and physical device; specify --device to avoid attaching to the wrong target`;
 }
 
-function describeCandidate(candidate: AttachCandidate): Record<string, unknown> {
+function describeCandidate(
+	candidate: AttachCandidate,
+): Record<string, unknown> {
 	return {
 		identifier: candidate.identifier,
 		name: candidate.name,
@@ -703,10 +706,13 @@ function describeCandidate(candidate: AttachCandidate): Record<string, unknown> 
 	};
 }
 
-function buildDeviceSelectionSuggestions(candidates: AttachCandidate[]): string[] {
+function buildDeviceSelectionSuggestions(
+	candidates: AttachCandidate[],
+): string[] {
 	const suggestions: string[] = [];
 	const simulator = candidates.find(
-		(candidate): candidate is SimulatorCandidate => candidate.kind === "simulator",
+		(candidate): candidate is SimulatorCandidate =>
+			candidate.kind === "simulator",
 	);
 	if (simulator) {
 		suggestions.push(

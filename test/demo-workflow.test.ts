@@ -183,32 +183,67 @@ describe("demo workflow — matches launch video outputs", () => {
 		expect(status.stdout).toContain("13");
 
 		// 2. dbg q "SELECT name, type, value FROM vars" → sees req, err (null), user
-		const vars = dbg("q", "SELECT name, type, value FROM vars");
+		const vars = dbg("q", "SELECT name, type, value FROM vars", "--json");
 		expect(vars.exitCode).toBe(0);
-		expect(vars.stdout).toContain("name\ttype\tvalue");
-		expect(vars.stdout).toContain("req\tobject\t[Object]");
-		expect(vars.stdout).toContain("err\tnull\tnull");
-		expect(vars.stdout).toContain("user\tstring\talice");
+		const varsParsed = JSON.parse(vars.stdout);
+		expect(varsParsed.ok).toBe(true);
+		expect(varsParsed.columns).toEqual(["name", "type", "value"]);
+		const varRows = varsParsed.rows as unknown[][];
+		expect(
+			varRows.some(
+				(r) => r[0] === "req" && r[1] === "object" && r[2] === "[Object]",
+			),
+		).toBe(true);
+		expect(
+			varRows.some(
+				(r) =>
+					r[0] === "err" &&
+					r[1] === "null" &&
+					(r[2] === null || r[2] === "null"),
+			),
+		).toBe(true);
+		expect(
+			varRows.some(
+				(r) => r[0] === "user" && r[1] === "string" && r[2] === "alice",
+			),
+		).toBe(true);
 
 		// 3. Get req object_id and drill into props
 		const varsWithId = dbg(
 			"q",
 			"SELECT name, object_id FROM vars WHERE name = 'req'",
+			"--json",
 		);
-		const objectId = varsWithId.stdout.trim().split("\n")[1]?.split("\t")[1];
+		const idParsed = JSON.parse(varsWithId.stdout);
+		const objectId = (idParsed.rows as unknown[][])[0]?.[1] as
+			| string
+			| undefined;
 		expect(objectId).toBeTruthy();
 
 		const props = dbg(
 			"q",
 			`SELECT name, type, value FROM props WHERE object_id = '${objectId}'`,
+			"--json",
 		);
 		expect(props.exitCode).toBe(0);
-		expect(props.stdout).toContain("url\tstring\t/api/data");
-		expect(props.stdout).toContain("method\tstring\tPOST");
+		const propsParsed = JSON.parse(props.stdout);
+		const propRows = propsParsed.rows as unknown[][];
+		expect(
+			propRows.some(
+				(r) => r[0] === "url" && r[1] === "string" && r[2] === "/api/data",
+			),
+		).toBe(true);
+		expect(
+			propRows.some(
+				(r) => r[0] === "method" && r[1] === "string" && r[2] === "POST",
+			),
+		).toBe(true);
 
 		// 4. dbg e "err === null" → true
-		const evalResult = dbg("e", "err === null");
+		const evalResult = dbg("e", "err === null", "--json");
 		expect(evalResult.exitCode).toBe(0);
-		expect(evalResult.stdout.trim()).toBe("true");
+		const evalParsed = JSON.parse(evalResult.stdout);
+		expect(evalParsed.ok).toBe(true);
+		expect(String(evalParsed.value)).toBe("true");
 	});
 });

@@ -171,8 +171,7 @@ async function runAttachStrategy(
 			});
 			return;
 		}
-		const startedStopped =
-			options.resolution.metadata?.startedStopped === true;
+		const startedStopped = options.resolution.metadata?.startedStopped === true;
 		await options.dap.attachLldbToPid({
 			pid: options.resolution.pid,
 			waitFor: false,

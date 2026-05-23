@@ -197,8 +197,15 @@ function isSimulatorAttachResolution(
 
 // ─── Lifecycle commands ───
 
+interface OpenPayload {
+	port: number;
+	host?: string;
+	type?: "page" | "node";
+	target?: string;
+}
+
 async function handleOpen(
-	args: string,
+	payload: OpenPayload,
 	sessionName?: string,
 ): Promise<Response> {
 	const name = sessionName ?? nextSessionName();
@@ -210,35 +217,12 @@ async function handleOpen(
 		};
 	}
 
-	// Parse flags from args
-	let remaining = args;
-	let targetType: "node" | "page" | undefined;
-	let targetId: string | undefined;
+	const targetType = payload.type;
+	const targetId = payload.target;
+	const host = payload.host ?? "127.0.0.1";
+	const port = payload.port;
 
-	const typeMatch = remaining.match(/--type\s+(node|page)/);
-	if (typeMatch) {
-		targetType = typeMatch[1] as "node" | "page";
-		remaining = remaining.replace(typeMatch[0], "").trim();
-	}
-
-	const targetMatch = remaining.match(/--target\s+(\S+)/);
-	if (targetMatch) {
-		targetId = targetMatch[1];
-		remaining = remaining.replace(targetMatch[0], "").trim();
-	}
-
-	let host = "127.0.0.1";
-	let port: number;
-
-	if (remaining.includes(":")) {
-		const parts = remaining.split(":");
-		host = parts[0];
-		port = Number.parseInt(parts[1], 10);
-	} else {
-		port = Number.parseInt(remaining, 10);
-	}
-
-	if (Number.isNaN(port)) {
+	if (!Number.isFinite(port) || Number.isNaN(port)) {
 		return { ok: false, error: "invalid port" };
 	}
 
@@ -395,8 +379,20 @@ async function handleRun(
 	}
 }
 
+interface AttachPayload {
+	provider: "apple-device";
+	platform: AttachPlatform;
+	bundleId: string;
+	device?: string;
+	pid?: number;
+	launch?: boolean;
+	attachStrategy?: import("@dbg/types").AttachStrategy;
+	attachTimeoutMs?: number;
+	verbose?: boolean;
+}
+
 async function handleAttach(
-	args: string,
+	payload: AttachPayload,
 	sessionName?: string,
 ): Promise<Response> {
 	const name = sessionName ?? nextSessionName();
@@ -407,9 +403,11 @@ async function handleAttach(
 		};
 	}
 
+	// Validate the payload via the shared schema. parseAttachRequest expects a
+	// JSON string; we already have a typed object, so stringify once.
 	let request: ReturnType<typeof parseAttachRequest>;
 	try {
-		request = parseAttachRequest(args);
+		request = parseAttachRequest(JSON.stringify(payload));
 	} catch (error) {
 		return {
 			ok: false,
@@ -731,7 +729,8 @@ async function createAttachSession(
 }
 
 async function handleAttachLldb(
-	args: string,
+	programPath: string,
+	programArgs: string[] | undefined,
 	sessionName?: string,
 ): Promise<Response> {
 	const name = sessionName ?? nextSessionName();
@@ -742,8 +741,6 @@ async function handleAttachLldb(
 		};
 	}
 
-	const tokens = args.trim().split(/\s+/).filter(Boolean);
-	const programPath = tokens[0];
 	if (!programPath) {
 		return { ok: false, error: "usage: attach-lldb <program-path>" };
 	}
@@ -753,7 +750,7 @@ async function handleAttachLldb(
 	try {
 		await dap.attachLldb({
 			programPath,
-			args: tokens.slice(1),
+			args: programArgs ?? [],
 		});
 
 		const session: Session = {
@@ -888,24 +885,15 @@ async function handleRestart(session: Session): Promise<Response> {
 
 // ─── Target listing ───
 
-async function handleTargets(args: string): Promise<Response> {
-	let host = "127.0.0.1";
-	let port: number;
+async function handleTargets(port: number, host?: string): Promise<Response> {
+	const effectiveHost = host ?? "127.0.0.1";
 
-	if (args.includes(":")) {
-		const parts = args.split(":");
-		host = parts[0];
-		port = Number.parseInt(parts[1], 10);
-	} else {
-		port = Number.parseInt(args, 10);
-	}
-
-	if (Number.isNaN(port)) {
+	if (!Number.isFinite(port) || Number.isNaN(port)) {
 		return { ok: false, error: "invalid port" };
 	}
 
 	try {
-		const targets = await listTargets(port, host);
+		const targets = await listTargets(port, effectiveHost);
 		return {
 			ok: true,
 			columns: ["id", "type", "title", "url"],
@@ -918,35 +906,17 @@ async function handleTargets(args: string): Promise<Response> {
 
 // ─── Apple device/simulator listing ───
 
-async function handleDevices(args?: string): Promise<Response> {
-	let platform: AttachPlatform = "auto";
-	if (args?.trim()) {
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(args);
-		} catch {
-			return {
-				ok: false,
-				error: "invalid devices args: expected JSON { platform?: string }",
-			};
-		}
-		if (parsed && typeof parsed === "object" && "platform" in parsed) {
-			const value = (parsed as { platform?: unknown }).platform;
-			if (typeof value === "string" && value.trim()) {
-				const next = value.trim() as AttachPlatform;
-				if (!ATTACH_PLATFORMS.includes(next)) {
-					return {
-						ok: false,
-						error: `unsupported platform '${value.trim()}'. Supported: ${ATTACH_PLATFORMS.join(", ")}`,
-					};
-				}
-				platform = next;
-			}
-		}
+async function handleDevices(platform?: AttachPlatform): Promise<Response> {
+	const effectivePlatform: AttachPlatform = platform ?? "auto";
+	if (platform && !ATTACH_PLATFORMS.includes(platform)) {
+		return {
+			ok: false,
+			error: `unsupported platform '${platform}'. Supported: ${ATTACH_PLATFORMS.join(", ")}`,
+		};
 	}
 
 	try {
-		const targets = listAppleAttachTargets(platform);
+		const targets = listAppleAttachTargets(effectivePlatform);
 		return {
 			ok: true,
 			columns: [
@@ -982,8 +952,7 @@ async function handleDevices(args?: string): Promise<Response> {
 
 // ─── App listing ───
 
-async function handleApps(args: string): Promise<Response> {
-	const deviceId = args.trim();
+async function handleApps(deviceId: string): Promise<Response> {
 	if (!deviceId) {
 		return { ok: false, error: "usage: apps <device-id>" };
 	}
@@ -1062,7 +1031,7 @@ async function handleUse(name: string): Promise<Response> {
 
 async function handleNavigate(
 	session: Session,
-	args: string,
+	action: import("@dbg/types").NavigateAction,
 ): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
@@ -1072,12 +1041,12 @@ async function handleNavigate(
 		return { ok: false, error: "not connected" };
 	}
 
-	if (args === "reload") {
+	if (action.action === "reload") {
 		await cdp.send("Page.reload", {});
 		return { ok: true, messages: ["reloading"] };
 	}
 
-	if (args === "back") {
+	if (action.action === "back") {
 		const history = (await cdp.send("Page.getNavigationHistory", {})) as {
 			currentIndex: number;
 			entries: Array<{ id: number; url: string }>;
@@ -1092,7 +1061,7 @@ async function handleNavigate(
 		return { ok: false, error: "no previous history entry" };
 	}
 
-	if (args === "forward") {
+	if (action.action === "forward") {
 		const history = (await cdp.send("Page.getNavigationHistory", {})) as {
 			currentIndex: number;
 			entries: Array<{ id: number; url: string }>;
@@ -1109,14 +1078,14 @@ async function handleNavigate(
 
 	// URL navigation
 	const result = (await cdp.send("Page.navigate", {
-		url: args,
+		url: action.url,
 	})) as { frameId: string; errorText?: string };
 
 	if (result.errorText) {
 		return { ok: false, error: `navigation failed: ${result.errorText}` };
 	}
 
-	return { ok: true, messages: [`navigated to ${args}`] };
+	return { ok: true, messages: [`navigated to ${action.url}`] };
 }
 
 async function handleScreenshot(
@@ -1149,7 +1118,10 @@ async function handleScreenshot(
 	return { ok: true, data: result.data, messages: ["screenshot captured"] };
 }
 
-async function handleClick(session: Session, args: string): Promise<Response> {
+async function handleClick(
+	session: Session,
+	selector: string,
+): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
 		return { ok: false, error: "requires browser session" };
@@ -1158,7 +1130,6 @@ async function handleClick(session: Session, args: string): Promise<Response> {
 		return { ok: false, error: "not connected" };
 	}
 
-	const selector = args.trim();
 	if (!selector) {
 		return { ok: false, error: "selector required" };
 	}
@@ -1219,7 +1190,11 @@ async function handleClick(session: Session, args: string): Promise<Response> {
 	}
 }
 
-async function handleType(session: Session, args: string): Promise<Response> {
+async function handleType(
+	session: Session,
+	selector: string,
+	text: string,
+): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
 		return { ok: false, error: "requires browser session" };
@@ -1228,19 +1203,9 @@ async function handleType(session: Session, args: string): Promise<Response> {
 		return { ok: false, error: "not connected" };
 	}
 
-	// Parse: "selector" "text" or selector text
-	const match =
-		args.match(/^"([^"]+)"\s+"([^"]*)"$/) ||
-		args.match(/^"([^"]+)"\s+(.+)$/) ||
-		args.match(/^(\S+)\s+"([^"]*)"$/) ||
-		args.match(/^(\S+)\s+(.+)$/);
-
-	if (!match) {
+	if (!selector) {
 		return { ok: false, error: 'usage: type "selector" "text"' };
 	}
-
-	const selector = match[1];
-	const text = match[2];
 
 	try {
 		// Get document and find element
@@ -1281,7 +1246,11 @@ async function handleType(session: Session, args: string): Promise<Response> {
 	}
 }
 
-async function handleSelect(session: Session, args: string): Promise<Response> {
+async function handleSelect(
+	session: Session,
+	selector: string,
+	value: string,
+): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
 		return { ok: false, error: "requires browser session" };
@@ -1290,19 +1259,9 @@ async function handleSelect(session: Session, args: string): Promise<Response> {
 		return { ok: false, error: "not connected" };
 	}
 
-	// Parse: "selector" "value"
-	const match =
-		args.match(/^"([^"]+)"\s+"([^"]*)"$/) ||
-		args.match(/^"([^"]+)"\s+(.+)$/) ||
-		args.match(/^(\S+)\s+"([^"]*)"$/) ||
-		args.match(/^(\S+)\s+(.+)$/);
-
-	if (!match) {
+	if (!selector) {
 		return { ok: false, error: 'usage: select "selector" "value"' };
 	}
-
-	const selector = match[1];
-	const value = match[2];
 
 	try {
 		// Find element and set value via Runtime
@@ -1343,7 +1302,12 @@ async function handleSelect(session: Session, args: string): Promise<Response> {
 
 // ─── Mock / Emulate / Throttle / Coverage ───
 
-async function handleMock(session: Session, args: string): Promise<Response> {
+async function handleMock(
+	session: Session,
+	urlPattern: string,
+	body: string,
+	status?: number,
+): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
 		return { ok: false, error: "requires browser session" };
@@ -1352,27 +1316,14 @@ async function handleMock(session: Session, args: string): Promise<Response> {
 		return { ok: false, error: "not connected" };
 	}
 
-	// Parse: url-pattern json-body [--status code]
-	let statusCode = 200;
-	let remaining = args;
-
-	const statusMatch = remaining.match(/--status\s+(\d+)/);
-	if (statusMatch) {
-		statusCode = Number.parseInt(statusMatch[1], 10);
-		remaining = remaining.replace(statusMatch[0], "").trim();
-	}
-
-	// Split into pattern and body
-	const parts = remaining.match(/^(\S+)\s+(.+)$/);
-	if (!parts) {
+	if (!urlPattern || body === undefined) {
 		return {
 			ok: false,
 			error: "usage: mock <url-pattern> <json-body> [--status <code>]",
 		};
 	}
 
-	const urlPattern = parts[1];
-	const body = parts[2];
+	const statusCode = status ?? 200;
 
 	// Add mock rule
 	cdp.addMockRule(urlPattern, body, statusCode);
@@ -1431,7 +1382,7 @@ async function handleUnmock(
 
 async function handleEmulate(
 	session: Session,
-	args: string,
+	presetRaw: string,
 ): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
@@ -1441,7 +1392,7 @@ async function handleEmulate(
 		return { ok: false, error: "not connected" };
 	}
 
-	const preset = args.trim().toLowerCase();
+	const preset = presetRaw.trim().toLowerCase();
 
 	if (preset === "reset") {
 		await cdp.send("Emulation.clearDeviceMetricsOverride", {});
@@ -1519,7 +1470,7 @@ async function handleEmulate(
 
 async function handleThrottle(
 	session: Session,
-	args: string,
+	presetRaw: string,
 ): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
@@ -1529,7 +1480,7 @@ async function handleThrottle(
 		return { ok: false, error: "not connected" };
 	}
 
-	const preset = args.trim().toLowerCase();
+	const preset = presetRaw.trim().toLowerCase();
 
 	const presets: Record<
 		string,
@@ -1579,7 +1530,7 @@ async function handleThrottle(
 
 async function handleCoverage(
 	session: Session,
-	args: string,
+	action: import("@dbg/types").CoverageAction,
 ): Promise<Response> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) {
@@ -1591,8 +1542,6 @@ async function handleCoverage(
 	if (!session.state.cdp) {
 		return { ok: false, error: "missing cdp state" };
 	}
-
-	const action = args.trim().toLowerCase();
 
 	if (action === "start") {
 		session.state.cdp.coverageSnapshot = null;
@@ -1691,13 +1640,12 @@ async function handleQuery(
 
 async function handleMemoryCommand(
 	session: Session,
-	args: string,
+	address: string,
+	length: number,
 ): Promise<Response> {
-	const [address, lengthStr] = args.trim().split(/\s+/);
-	if (!address || !lengthStr) {
+	if (!address) {
 		return { ok: false, error: "usage: memory <address> <length>" };
 	}
-	const length = Number.parseInt(lengthStr, 10);
 	if (!Number.isFinite(length) || length <= 0) {
 		return { ok: false, error: "length must be a positive integer" };
 	}
@@ -1709,55 +1657,61 @@ async function handleMemoryCommand(
 
 async function handleDisasmCommand(
 	session: Session,
-	args?: string,
+	address?: string,
 ): Promise<Response> {
-	const trimmed = (args ?? "").trim();
-	if (!trimmed) {
+	if (!address) {
 		const frame = session.state.callFrames[0];
 		// Prefer instructionAddress (actual memory address) over scriptId (file path in DAP)
-		const address = frame?.instructionAddress ?? frame?.scriptId;
-		if (!address || looksLikeFilePath(address)) {
+		const frameAddress = frame?.instructionAddress ?? frame?.scriptId;
+		if (!frameAddress || looksLikeFilePath(frameAddress)) {
 			return { ok: false, error: "usage: disasm <address>" };
 		}
 		return handleQuery(
-			`SELECT * FROM disassembly WHERE address = '${address}' LIMIT 32`,
+			`SELECT * FROM disassembly WHERE address = '${frameAddress}' LIMIT 32`,
 			session,
 		);
 	}
 	return handleQuery(
-		`SELECT * FROM disassembly WHERE address = '${trimmed}' LIMIT 32`,
+		`SELECT * FROM disassembly WHERE address = '${address}' LIMIT 32`,
 		session,
 	);
 }
 
 function looksLikeFilePath(value: string): boolean {
-	return value.startsWith("/") || value.startsWith("\\") || value.includes("://");
+	return (
+		value.startsWith("/") || value.startsWith("\\") || value.includes("://")
+	);
 }
 
 // ─── Dispatch ───
 
 async function dispatch(cmd: Command): Promise<Response> {
-	const sessionName = cmd.s;
-
+	// Global (session-agnostic) commands first.
 	switch (cmd.cmd) {
 		case "devices":
-			return handleDevices(cmd.args);
+			return handleDevices(cmd.platform);
 		case "apps":
-			return handleApps(cmd.args);
-		case "open":
-			return handleOpen(cmd.args, sessionName);
-		case "attach-lldb":
-			return handleAttachLldb(cmd.args, sessionName);
-		case "attach":
-			return handleAttach(cmd.args, sessionName);
-		case "run":
-			return handleRun(cmd.args, sessionName);
+			return handleApps(cmd.deviceId);
 		case "ss":
 			return handleSessions();
 		case "use":
-			return handleUse(cmd.args);
+			return handleUse(cmd.name);
 		case "targets":
-			return handleTargets(cmd.args);
+			return handleTargets(cmd.port, cmd.host);
+	}
+
+	// Session-scoped commands share an optional `session` field.
+	const sessionName = cmd.session;
+
+	switch (cmd.cmd) {
+		case "open":
+			return handleOpen(cmd, sessionName);
+		case "attach-lldb":
+			return handleAttachLldb(cmd.program, cmd.args, sessionName);
+		case "attach":
+			return handleAttach(cmd, sessionName);
+		case "run":
+			return handleRun(cmd.command, sessionName);
 		default: {
 			// Commands that work without sessions
 			if (cmd.cmd === "close" && registry.sessions.size === 0) {
@@ -1773,7 +1727,7 @@ async function dispatch(cmd: Command): Promise<Response> {
 				if (sessionName && !registry.sessions.has(sessionName)) {
 					return { ok: false, error: `unknown session: ${sessionName}` };
 				}
-				return handleQuery(cmd.args, resolveSession(sessionName));
+				return handleQuery(cmd.sql, resolveSession(sessionName));
 			}
 
 			const session = resolveSession(sessionName);
@@ -1817,17 +1771,29 @@ async function dispatchToSession(
 		case "pause":
 			return handlePause(session.executor, session.state);
 		case "b":
-			return handleSetBreakpoint(session.executor, session.state, cmd.args);
+			return handleSetBreakpoint(
+				session.executor,
+				session.state,
+				cmd.file,
+				cmd.line,
+				cmd.condition,
+			);
 		case "db":
-			return handleDeleteBreakpoint(session.executor, session.state, cmd.args);
+			return handleDeleteBreakpoint(session.executor, session.state, cmd.id);
 		case "bl":
 			return handleListBreakpoints(session.executor, session.state);
 		case "e":
-			return handleEval(session.executor, session.state, cmd.args);
+			return handleEval(session.executor, session.state, cmd.expression);
 		case "src":
-			return handleSource(session.executor, session.state, cmd.args);
+			return handleSource(
+				session.executor,
+				session.state,
+				cmd.file,
+				cmd.start,
+				cmd.end,
+			);
 		case "trace":
-			return handleTrace(store, cmd.args);
+			return handleTrace(store, cmd.limit);
 		case "health":
 			return handleHealth(session.executor, session.state);
 		case "reconnect":
@@ -1838,57 +1804,57 @@ async function dispatchToSession(
 				session.targetType === "native" ? undefined : session.targetType,
 			);
 		case "q":
-			return handleQuery(cmd.args, session);
+			return handleQuery(cmd.sql, session);
 		case "navigate":
 			if (!session.executor.capabilities.page) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleNavigate(session, cmd.args);
+			return handleNavigate(session, cmd.action);
 		case "screenshot":
 			if (!session.executor.capabilities.page) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleScreenshot(session, cmd.args);
+			return handleScreenshot(session, cmd.path);
 		case "click":
 			if (!session.executor.capabilities.dom) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleClick(session, cmd.args);
+			return handleClick(session, cmd.selector);
 		case "type":
 			if (!session.executor.capabilities.dom) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleType(session, cmd.args);
+			return handleType(session, cmd.selector, cmd.text);
 		case "select":
 			if (!session.executor.capabilities.dom) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleSelect(session, cmd.args);
+			return handleSelect(session, cmd.selector, cmd.value);
 		case "mock":
 			if (!session.executor.capabilities.network) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleMock(session, cmd.args);
+			return handleMock(session, cmd.urlPattern, cmd.body, cmd.status);
 		case "unmock":
 			if (!session.executor.capabilities.network) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleUnmock(session, cmd.args);
+			return handleUnmock(session, cmd.pattern);
 		case "emulate":
 			if (!session.executor.capabilities.emulation) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleEmulate(session, cmd.args);
+			return handleEmulate(session, cmd.preset);
 		case "throttle":
 			if (!session.executor.capabilities.network) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleThrottle(session, cmd.args);
+			return handleThrottle(session, cmd.preset);
 		case "coverage":
 			if (!session.executor.capabilities.coverage) {
 				return { ok: false, error: "requires browser session" };
 			}
-			return handleCoverage(session, cmd.args);
+			return handleCoverage(session, cmd.action);
 		case "registers":
 			if (!session.executor.capabilities.registers) {
 				return { ok: false, error: "requires LLDB session" };
@@ -1898,12 +1864,12 @@ async function dispatchToSession(
 			if (!session.executor.capabilities.memory) {
 				return { ok: false, error: "requires LLDB session" };
 			}
-			return handleMemoryCommand(session, cmd.args);
+			return handleMemoryCommand(session, cmd.address, cmd.length);
 		case "disasm":
 			if (!session.executor.capabilities.disassembly) {
 				return { ok: false, error: "requires LLDB session" };
 			}
-			return handleDisasmCommand(session, cmd.args);
+			return handleDisasmCommand(session, cmd.address);
 		default:
 			return {
 				ok: false,
