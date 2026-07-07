@@ -280,7 +280,16 @@ export type Command =
 	// Capture now and diff vs an anchor capture (see AnchorSpec kinds):
 	// at = "capture:<id>" | "mark:<name>" | "time:<ts>" | "file:<path>".
 	// Writes report.html; open=true additionally spawns `open`.
-	| { cmd: "record.after"; at?: string; open?: boolean }
+	// Verdict sections default on; --no-network/--no-state/--no-a11y skip the
+	// matching (individually skippable) computation to keep `after` fast.
+	| {
+			cmd: "record.after";
+			at?: string;
+			open?: boolean;
+			noNetwork?: boolean;
+			noState?: boolean;
+			noA11y?: boolean;
+	  }
 	// Render the timeline filmstrip HTML from recorded captures.
 	// limit = max most-recent frames embedded (default 100).
 	| { cmd: "record.timeline"; open?: boolean; limit?: number }

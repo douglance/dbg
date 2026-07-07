@@ -312,6 +312,49 @@ describe("timeline union table", () => {
 		expect(labels).not.toContain("http://old");
 	});
 
+	it("includes netfail rows reconstructed from network events (wall-clock ts)", async () => {
+		isolateDevSources();
+		store = new EventStore(":memory:");
+		// A failed request: requestWillBeSent (url/method) + responseReceived 500.
+		store.record?.(
+			{
+				source: "cdp_recv",
+				category: "cdp",
+				method: "Network.requestWillBeSent",
+				data: {
+					event: {
+						requestId: "r1",
+						request: { url: "http://x/api/error", method: "GET" },
+					},
+				},
+				sessionId: "recorder",
+			},
+			true,
+		);
+		store.record?.(
+			{
+				source: "cdp_recv",
+				category: "cdp",
+				method: "Network.responseReceived",
+				data: {
+					event: {
+						requestId: "r1",
+						response: { url: "http://x/api/error", status: 500 },
+					},
+				},
+				sessionId: "recorder",
+			},
+			true,
+		);
+		const result = await timelineTable.fetch(null, storeExecutor(store));
+		const kindIdx = result.columns.indexOf("kind");
+		const labelIdx = result.columns.indexOf("label");
+		const netfails = result.rows.filter((r) => r[kindIdx] === "netfail");
+		expect(netfails.length).toBe(1);
+		expect(String(netfails[0][labelIdx])).toContain("api/error");
+		expect(String(netfails[0][labelIdx])).toContain("500");
+	});
+
 	it("includes history beyond 24h when WHERE constrains ts", async () => {
 		isolateDevSources();
 		const now = Date.now();

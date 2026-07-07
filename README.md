@@ -231,13 +231,16 @@ by method + normalized URL pattern → added/removed/status-changed/duration-del
 `stateChanges` (added/removed/changed local & sessionStorage keys, from the
 per-capture `state_snapshots`), and `a11yNew` (accessibility issues new since the
 anchor: missing alt, control/button without name, control without label,
-duplicate landmark, missing title). `dbg why [substring]` walks the unified
-timeline back from an error to ranked causes — the recent edits (weighted by
-recency + whether their file is in the stack trace), the enclosing epoch, the
+duplicate landmark, missing title). Each section is individually skippable
+(`--skip-network`/`--skip-state`/`--skip-a11y`). `dbg why [substring]` walks the
+unified timeline back from an error to ranked causes — the recent edits (weighted
+by recency + whether their file is in the stack trace), the enclosing epoch, the
 nearest commit, and the active agent prompt — and phrases a one-line `answer`
 like *"…2.1s after you saved src/Cart.tsx (epoch 4: 'before-fix', prompt: 'add
-coupon field')"*. Both stay within the sub-second `after` budget (measured
-221ms; no budget increase needed).
+coupon field')"*. `dbg why` reads the **persisted** event store, so it works
+after `record --stop`. Both stay within the sub-second `after` budget (measured
+~220ms; no budget increase needed). The full Accessibility tree is stored as a
+gzipped, retention-managed blob per capture (`captures.ax_path`).
 
 `dbg shoot Component.tsx` renders the component in an esbuild harness using
 *your* project's react-dom and screenshots `#dbg-root`; `--states` forces
@@ -338,7 +341,7 @@ edits, git commits, screenshots, and agent history join directly:
 | `timeline` | Union over captures/epochs/edits/console-errors/exceptions/commits/prompts/diffs | `ts`, `kind`, `session_id`, `label`, `ref_id`, `detail` |
 
 `timeline` defaults to the last 24h (unless a `WHERE` constrains `ts`); `kind` is
-`capture`/`mark`/`epoch`/`edit`/`error`/`exception`/`commit`/`prompt`/`diff`.
+`capture`/`mark`/`epoch`/`edit`/`error`/`exception`/`netfail`/`commit`/`prompt`/`diff`.
 `dbg q` threads your shell cwd so the dev tables scope to your project.
 
 Queries that reference more than one table (or use `JOIN`/`BETWEEN`/`GROUP
@@ -364,7 +367,8 @@ dbg q "SELECT c.short_hash, c.summary FROM commits c
 
 Cold-scan costs: `commits` ~50–150ms (git), `agent_prompts` ~100ms (one JSONL),
 `agent_sessions` ~0.7s cold / ~50ms warm (cached), store tables sub-ms. Network
-failures are excluded from `timeline` (CDP Network ts is monotonic, not epoch-ms).
+failures ride the `netfail` kind, reconstructed from the raw events table (whose
+`ts` is wall-clock epoch-ms at receipt, not CDP's monotonic timestamp).
 
 #### Object Drill-Down
 

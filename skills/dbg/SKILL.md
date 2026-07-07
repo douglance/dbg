@@ -207,7 +207,12 @@ causes and returns a `why` verdict + one-line `answer`, e.g. *"'Cannot read x of
 undefined' first seen …, 2.1s after you saved src/Cart.tsx (epoch 4:
 'before-fix', prompt: 'add coupon field')"*. Ranking = edit recency +
 file-in-stack-trace bonus; plus the enclosing epoch, nearest commit, and active
-agent prompt. Needs a live recording/session (reads that session's errors).
+agent prompt. Reads errors from the **persisted** event store, so it works after
+`record --stop` (subject to the events TTL).
+
+Each `after` section is individually skippable to stay fast: `--skip-network`,
+`--skip-state`, `--skip-a11y` (measured `after` ≈ 220ms with all on, so no
+budget bump was needed).
 
 ### Deliberate Captures (shoot)
 
@@ -373,9 +378,10 @@ agent history all join on `ts` directly.
 
 `timeline` is a single ts-ordered union (columns: `ts`, `kind`, `session_id`,
 `label`, `ref_id`, `detail`). `kind` ∈ `capture` (label=url) · `mark`/`epoch` ·
-`edit` (label=path) · `error` / `exception` (label=text) · `commit`
-(label=summary, ref_id=short_hash) · `prompt` (label=first 120 chars) · `diff`.
-It defaults to the **last 24h** unless a `WHERE` constrains `ts`.
+`edit` (label=path) · `error` / `exception` (label=text) · `netfail`
+(label=`method url status`) · `commit` (label=summary, ref_id=short_hash) ·
+`prompt` (label=first 120 chars) · `diff`. It defaults to the **last 24h**
+unless a `WHERE` constrains `ts`.
 
 Multi-table joins, `BETWEEN`, `GROUP BY`, and aliases now run as **real SQL**:
 queries that reference more than one table (or that the single-table engine
@@ -409,9 +415,9 @@ path+mtime+size). `edits` / `captures` / `epochs` / `diffs` are indexed store
 reads (sub-ms). `dbg timeline` HTML now interleaves commit + prompt chips between
 frame cards by `ts`.
 
-> Network failures are **not** yet in `timeline`: CDP Network timestamps are
-> monotonic-clock seconds, not epoch-ms, so they'd break the unified `ts`
-> contract (query the `network` table directly meanwhile).
+> Network failures ride the timeline as the `netfail` kind, reconstructed from
+> the raw events table (whose `ts` is wall-clock epoch-ms at receipt — not CDP's
+> monotonic `Network.*.timestamp`), so they honor the unified `ts` contract.
 
 ## Output Format
 

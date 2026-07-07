@@ -13,10 +13,9 @@
 //   • the live session state (console errors, exceptions) via getState()
 //   • the dev tables (commits, agent_prompts) via their own fetch()
 //
-// Network failures are intentionally NOT included yet: CDP Network timestamps
-// are monotonic-clock seconds, not epoch-ms wall time, so they would violate
-// the unified ts contract. (Deferred to the Plan V network work, which records
-// wall time.)
+// Network failures ('netfail') are reconstructed from the raw events table,
+// whose `ts` is wall-clock epoch-ms at receipt (NOT CDP's monotonic
+// Network.*.timestamp) — so they honor the unified ts contract.
 //
 // Default window: the last 24h, UNLESS the WHERE clause constrains `ts` (any
 // comparison on ts opts into the full history the sources retain). The engine
@@ -43,6 +42,80 @@ interface TimelineState {
 		file?: string;
 		line?: number;
 	}>;
+}
+
+interface StoreLike {
+	query(sql: string, params?: unknown[]): Record<string, unknown>[];
+}
+
+interface NetFailure {
+	ts: number;
+	label: string;
+	requestId: string;
+	status?: number;
+	error?: string;
+}
+
+/** Network failures from the raw events table (wall-clock `ts`). */
+function networkFailuresFromEvents(store: StoreLike): NetFailure[] {
+	const rows = store.query(
+		`SELECT ts, method, data FROM events
+		 WHERE source = 'cdp_recv'
+		   AND method IN ('Network.requestWillBeSent','Network.responseReceived','Network.loadingFailed')
+		 ORDER BY id`,
+	);
+	const urls = new Map<string, { url: string; method: string }>();
+	const failures: NetFailure[] = [];
+	for (const row of rows) {
+		let data: {
+			event?: {
+				requestId?: string;
+				request?: { url?: string; method?: string };
+				response?: { url?: string; status?: number };
+				errorText?: string;
+			};
+		};
+		try {
+			data = JSON.parse(String(row.data ?? "{}"));
+		} catch {
+			continue;
+		}
+		const event = data.event;
+		const requestId = event?.requestId;
+		if (!requestId) continue;
+		const ts = Number(row.ts);
+		if (row.method === "Network.requestWillBeSent") {
+			if (event?.request?.url) {
+				urls.set(requestId, {
+					url: event.request.url,
+					method: event.request.method ?? "GET",
+				});
+			}
+		} else if (row.method === "Network.loadingFailed") {
+			const req = urls.get(requestId);
+			failures.push({
+				ts,
+				requestId,
+				label:
+					`${req?.method ?? ""} ${req?.url ?? "(unknown)"} ${event?.errorText ?? "failed"}`.trim(),
+				error: event?.errorText ?? "failed",
+			});
+		} else if (
+			row.method === "Network.responseReceived" &&
+			(event?.response?.status ?? 0) >= 400
+		) {
+			const req = urls.get(requestId);
+			const status = event?.response?.status;
+			failures.push({
+				ts,
+				requestId,
+				label:
+					`${req?.method ?? ""} ${event?.response?.url ?? req?.url ?? "(unknown)"} ${status ?? ""}`.trim(),
+				status,
+			});
+		}
+	}
+	return failures;
 }
 
 export const timelineTable: VirtualTable = {
@@ -109,6 +182,16 @@ export const timelineTable: VirtualTable = {
 				`SELECT id, ts, name FROM diffs ORDER BY id DESC LIMIT ${SOURCE_LIMIT}`,
 			)) {
 				push(r.ts, "diff", null, r.name ?? "", r.id, null);
+			}
+
+			// Network failures reconstructed from the raw events (whose `ts` is
+			// wall-clock epoch-ms at receipt — unlike CDP's monotonic
+			// Network.*.timestamp): loadingFailed (any) + responseReceived >= 400.
+			for (const nf of networkFailuresFromEvents(store)) {
+				push(nf.ts, "netfail", null, nf.label, nf.requestId, {
+					status: nf.status ?? null,
+					error: nf.error ?? null,
+				});
 			}
 		}
 

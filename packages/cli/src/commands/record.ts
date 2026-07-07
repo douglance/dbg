@@ -124,6 +124,18 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 					"Anchor: capture:<id> | mark:<name> | time:<ts> | file:<path> (default: latest epoch, else first capture)",
 				),
 			open: z.boolean().optional().describe("Open report.html in a browser"),
+			skipNetwork: z
+				.boolean()
+				.optional()
+				.describe("Skip the network-diff section"),
+			skipState: z
+				.boolean()
+				.optional()
+				.describe("Skip the storage/state-changes section"),
+			skipA11y: z
+				.boolean()
+				.optional()
+				.describe("Skip the new-a11y-issues section"),
 		}),
 		async run({ args, options }) {
 			const cmd: Command = { cmd: "record.after" };
@@ -133,6 +145,9 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 			if (options.at) cmd.at = options.at;
 			else if (args.name) cmd.at = `mark:${args.name}`;
 			if (options.open) cmd.open = true;
+			if (options.skipNetwork) cmd.noNetwork = true;
+			if (options.skipState) cmd.noState = true;
+			if (options.skipA11y) cmd.noA11y = true;
 			return await sendCommand(cmd);
 		},
 	});

@@ -208,7 +208,41 @@ describe.runIf(hasChrome)("Plan V e2e — verdicts", () => {
 			expect(html).toContain("State changes");
 			expect(html).toContain("Network diff");
 
-			// (a) dbg why names the saved file.
+			// netfail is a first-class timeline kind (wall-clock ts from events).
+			const tl = dbg(
+				"q",
+				"SELECT COUNT(*) FROM timeline WHERE kind = 'netfail'",
+				"--json",
+			);
+			expect(tl.exitCode, tl.stdout + tl.stderr).toBe(0);
+			expect(
+				Number((JSON.parse(tl.stdout) as { rows: unknown[][] }).rows[0][0]),
+			).toBeGreaterThan(0);
+
+			// Sections are individually skippable.
+			const skip = dbg(
+				"after",
+				"baseline",
+				"--skip-network",
+				"--skip-state",
+				"--skip-a11y",
+				"--json",
+			);
+			expect(skip.exitCode, skip.stdout + skip.stderr).toBe(0);
+			const skipRes = JSON.parse(skip.stdout) as {
+				ok: boolean;
+				networkDiff?: unknown;
+				stateChanges?: unknown[];
+				a11yNew?: unknown[];
+			};
+			expect(skipRes.ok).toBe(true);
+			expect(skipRes.networkDiff).toBeUndefined();
+			expect(skipRes.stateChanges ?? []).toHaveLength(0);
+			expect(skipRes.a11yNew ?? []).toHaveLength(0);
+
+			// (a) dbg why works AFTER record --stop (persisted error history) and
+			// still names the saved file.
+			dbg("record", "--stop", "--json");
 			const why = dbg("why", "boom-coupon", "--json");
 			expect(why.exitCode, why.stdout + why.stderr).toBe(0);
 			const whyRes = JSON.parse(why.stdout) as {
@@ -223,8 +257,6 @@ describe.runIf(hasChrome)("Plan V e2e — verdicts", () => {
 			expect(whyRes.why?.edits.some((e) => e.path.includes("Cart.tsx"))).toBe(
 				true,
 			);
-
-			dbg("record", "--stop", "--json");
 		},
 	);
 });

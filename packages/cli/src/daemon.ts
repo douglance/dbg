@@ -1096,26 +1096,38 @@ async function collectCaptureState(
 	}
 }
 
-/** Fetch the AX tree, compute the 5 rules → a11y_issues rows. */
-async function collectCaptureA11y(
+/** Fetch the AX tree once → gzipped, content-addressed blob (retention-managed
+ * like DOM snapshots) + the parsed tree for rule evaluation. Null on failure. */
+async function captureAxBlob(
 	cdp: CdpClientWrapper,
-	captureId: number,
-): Promise<void> {
+	blobsDir: string,
+): Promise<{ axPath: string; tree: AxTree } | null> {
 	try {
 		const tree = (await cdp.send("Accessibility.getFullAXTree", {})) as AxTree;
-		const issues = computeA11yIssues(tree);
-		if (issues.length > 0) {
-			store.insertA11yIssues(
-				issues.map((i) => ({
-					captureId,
-					rule: i.rule,
-					selector: i.selector,
-					detail: i.detail,
-				})),
-			);
-		}
+		if (!Array.isArray(tree.nodes) || tree.nodes.length === 0) return null;
+		const json = JSON.stringify(tree);
+		const axHash = createHash("sha256").update(json).digest("hex").slice(0, 16);
+		const axPath = path.join(blobsDir, `${axHash}-ax.json.gz`);
+		if (!fs.existsSync(axPath)) fs.writeFileSync(axPath, gzipSync(json));
+		return { axPath, tree };
 	} catch {
 		// Accessibility domain unavailable — skip
+		return null;
+	}
+}
+
+/** Compute the 5 a11y rules from a captured tree → a11y_issues rows. */
+function storeA11yIssues(captureId: number, tree: AxTree): void {
+	const issues = computeA11yIssues(tree);
+	if (issues.length > 0) {
+		store.insertA11yIssues(
+			issues.map((i) => ({
+				captureId,
+				rule: i.rule,
+				selector: i.selector,
+				detail: i.detail,
+			})),
+		);
 	}
 }
 
@@ -1206,6 +1218,10 @@ async function captureRecorderFrame(
 		// never fail the capture over its snapshot
 	}
 
+	// Plan V: accessibility tree → gzipped, content-addressed, retention-managed
+	// blob; the parsed tree feeds the a11y rules after the row is inserted.
+	const ax = await captureAxBlob(cdp, blobsDir);
+
 	let url = session.targetUrl ?? "";
 	let scrollY = 0;
 	try {
@@ -1239,10 +1255,11 @@ async function captureRecorderFrame(
 		hmrModules: recorder ? [...recorder.pendingHmrModules] : [],
 		epochId: recorder?.currentEpochId ?? null,
 		snapshotPath,
+		axPath: ax?.axPath ?? null,
 	});
 	// Plan V: per-capture app-state + a11y metadata (best-effort).
 	await collectCaptureState(cdp, id);
-	await collectCaptureA11y(cdp, id);
+	if (ax) storeA11yIssues(id, ax.tree);
 	if (recorder) {
 		recorder.lastHash = hash;
 		recorder.lastCaptureTs = ts;
@@ -1993,6 +2010,7 @@ function openInBrowser(filePath: string): void {
 async function handleRecordAfter(
 	at?: string,
 	open?: boolean,
+	sections?: { noNetwork?: boolean; noState?: boolean; noA11y?: boolean },
 ): Promise<Response> {
 	if (!recorder) {
 		return {
@@ -2066,22 +2084,31 @@ async function handleRecordAfter(
 		const networkNew = networkDeltaSince(anchor.ts);
 
 		// ── Plan V: network diff, state (storage) diff, new a11y issues ──
-		const netReqs = reconstructNetworkRequests(anchor.ts - 60000);
-		const networkDiff = diffNetwork(
-			netReqs.filter((r) => r.ts <= anchor.ts),
-			netReqs.filter((r) => r.ts > anchor.ts),
-		);
-		const stateChanges = diffStorage(
-			loadStorageSnapshot(anchor.id),
-			loadStorageSnapshot(frame.id),
-		);
-		const anchorA11y = loadA11yIssues(anchor.id);
-		const a11yBefore = new Set(
-			anchorA11y.map((i) => `${i.rule}|${i.selector}`),
-		);
-		const a11yNew = loadA11yIssues(frame.id).filter(
-			(i) => !a11yBefore.has(`${i.rule}|${i.selector}`),
-		);
+		// Each section is individually skippable (--no-network/--no-state/
+		// --no-a11y) to keep `after` fast when a section isn't needed.
+		let networkDiff: NetworkDiff | undefined;
+		if (!sections?.noNetwork) {
+			const netReqs = reconstructNetworkRequests(anchor.ts - 60000);
+			networkDiff = diffNetwork(
+				netReqs.filter((r) => r.ts <= anchor.ts),
+				netReqs.filter((r) => r.ts > anchor.ts),
+			);
+		}
+		const stateChanges: StateChange[] = sections?.noState
+			? []
+			: diffStorage(
+					loadStorageSnapshot(anchor.id),
+					loadStorageSnapshot(frame.id),
+				);
+		let a11yNew: Array<{ rule: string; selector: string; detail: string }> = [];
+		if (!sections?.noA11y) {
+			const a11yBefore = new Set(
+				loadA11yIssues(anchor.id).map((i) => `${i.rule}|${i.selector}`),
+			);
+			a11yNew = loadA11yIssues(frame.id).filter(
+				(i) => !a11yBefore.has(`${i.rule}|${i.selector}`),
+			);
+		}
 
 		// ── Phase 4: component blame + structural style diff ──
 		const baselineSnapshot = loadPageSnapshot(anchor.snapshotPath);
@@ -2226,36 +2253,90 @@ async function handleRecordAfter(
 }
 
 // ── Plan V: dbg why — blame the most recent (or matched) error ──
-async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
-	const session =
-		registry.sessions.get(RECORDER_SESSION) ??
-		registry.sessions.values().next().value ??
-		null;
-	if (!session) {
-		return {
-			ok: false,
-			error: "no active session; dbg why needs a live recording/session",
-		};
-	}
+function stackUrlsFromTrace(trace: unknown): string {
+	const frames = (trace as { callFrames?: Array<{ url?: string }> })
+		?.callFrames;
+	if (!Array.isArray(frames)) return "";
+	return frames
+		.map((f) => (typeof f.url === "string" ? f.url : ""))
+		.filter(Boolean)
+		.join(" ");
+}
 
-	// Error-like entries (console errors/asserts + exceptions) with stack hints.
-	const errs: Array<{ ts: number; text: string; stack: string }> = [];
-	for (const e of session.state.console) {
-		if (e.type !== "error" && e.type !== "assert") continue;
-		errs.push({ ts: e.ts, text: e.text, stack: e.stack ?? "" });
+function consoleArgsText(args: unknown): string {
+	if (!Array.isArray(args)) return "";
+	return args
+		.map((a) => {
+			if (typeof a !== "object" || a === null) return String(a);
+			const rec = a as Record<string, unknown>;
+			if (rec.value !== undefined) return String(rec.value);
+			if (typeof rec.description === "string") return rec.description;
+			return typeof rec.type === "string" ? `[${rec.type}]` : "";
+		})
+		.filter(Boolean)
+		.join(" ");
+}
+
+/** Reconstruct persisted console errors/asserts + exceptions from the events
+ * store (epoch-ms ts) so `dbg why` works after `record --stop`. Deduped by
+ * text+second (Chrome double-reports console.error via Runtime + Log). Tap
+ * sentinels (Plan W) are filtered here — the single console-dedupe choke. */
+function persistedErrors(): Array<{ ts: number; text: string; stack: string }> {
+	const rows = store.query(
+		`SELECT ts, method, data FROM events
+		 WHERE source = 'cdp_recv'
+		   AND method IN ('Runtime.consoleAPICalled','Log.entryAdded','Runtime.exceptionThrown')
+		 ORDER BY id`,
+	);
+	const out: Array<{ ts: number; text: string; stack: string }> = [];
+	const seen = new Set<string>();
+	const add = (ts: number, text: string, stack: string): void => {
+		if (text === "" || text.startsWith("__dbg_tap:")) return; // Plan W sentinel
+		const key = `${text}|${Math.floor(ts / 1000)}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		out.push({ ts, text, stack });
+	};
+	for (const row of rows) {
+		let data: { event?: Record<string, unknown> };
+		try {
+			data = JSON.parse(String(row.data ?? "{}"));
+		} catch {
+			continue;
+		}
+		const event = data.event;
+		if (!event) continue;
+		const ts = Number(row.ts);
+		if (row.method === "Runtime.consoleAPICalled") {
+			const type = String(event.type ?? "");
+			if (type !== "error" && type !== "assert") continue;
+			add(
+				ts,
+				consoleArgsText(event.args),
+				stackUrlsFromTrace(event.stackTrace),
+			);
+		} else if (row.method === "Log.entryAdded") {
+			const entry = event.entry as Record<string, unknown> | undefined;
+			if (!entry || entry.level !== "error") continue;
+			add(ts, String(entry.text ?? ""), String(entry.url ?? ""));
+		} else if (row.method === "Runtime.exceptionThrown") {
+			const ed = event.exceptionDetails as Record<string, unknown> | undefined;
+			if (!ed) continue;
+			const exception = ed.exception as Record<string, unknown> | undefined;
+			const text = String(exception?.description ?? ed.text ?? "exception");
+			const stack = `${String(exception?.description ?? "")} ${String(ed.url ?? "")} ${stackUrlsFromTrace(ed.stackTrace)}`;
+			add(ts, text, stack);
+		}
 	}
-	for (const ex of session.state.exceptions) {
-		errs.push({
-			ts: ex.ts,
-			text: ex.text,
-			stack: ex.file ? `${ex.file}:${ex.line}` : "",
-		});
-	}
+	return out;
+}
+
+async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
+	// Errors are read from the PERSISTED events store, so `dbg why` works after
+	// `record --stop` (subject to the events TTL).
+	const errs = persistedErrors();
 	if (errs.length === 0) {
-		return {
-			ok: false,
-			error: "no errors or exceptions recorded in this session",
-		};
+		return { ok: false, error: "no errors or exceptions recorded" };
 	}
 	errs.sort((a, b) => a.ts - b.ts);
 
@@ -2273,7 +2354,7 @@ async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
 	const edits = store
 		.query(
 			"SELECT ts, path, epoch_id FROM edits WHERE session_id = ? AND ts >= ? AND ts <= ? ORDER BY ts",
-			[session.name, targetTs - windowMs, targetTs],
+			[RECORDER_SESSION, targetTs - windowMs, targetTs],
 		)
 		.map((r) => ({
 			ts: Number(r.ts),
@@ -2283,7 +2364,7 @@ async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
 	const epochs = store
 		.query(
 			"SELECT id, ts, name FROM epochs WHERE session_id = ? AND ts <= ? ORDER BY ts",
-			[session.name, targetTs],
+			[RECORDER_SESSION, targetTs],
 		)
 		.map((r) => ({
 			id: Number(r.id),
@@ -2291,18 +2372,22 @@ async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
 			name: r.name == null ? null : String(r.name),
 		}));
 
-	// Commits + prompts via the dev tables, scoped to the client's cwd.
+	// Commits + prompts via the dev tables, scoped to the client's cwd. Works
+	// with no live session (a throwaway store-backed executor suffices).
+	const session = registry.sessions.get(RECORDER_SESSION) ?? null;
+	const executor =
+		session?.executor ?? new CdpClientWrapper(createState(), store);
 	setScopeCwd(cwd ?? null);
 	let commits: WhyCandidates["commits"] = [];
 	let prompts: WhyCandidates["prompts"] = [];
 	try {
-		const cRes = await commitsTable.fetch(null, session.executor);
+		const cRes = await commitsTable.fetch(null, executor);
 		commits = cRes.rows.map((row) => ({
 			ts: Number(row[2]),
 			shortHash: String(row[1] ?? ""),
 			summary: String(row[4] ?? ""),
 		}));
-		const pRes = await agentPromptsTable.fetch(null, session.executor);
+		const pRes = await agentPromptsTable.fetch(null, executor);
 		prompts = pRes.rows.map((row) => ({
 			ts: Number(row[0]),
 			display: String(row[1] ?? ""),
@@ -3643,7 +3728,11 @@ async function dispatch(cmd: Command): Promise<Response> {
 		case "record.mark":
 			return handleRecordMark(cmd.name);
 		case "record.after":
-			return handleRecordAfter(cmd.at, cmd.open);
+			return handleRecordAfter(cmd.at, cmd.open, {
+				noNetwork: cmd.noNetwork,
+				noState: cmd.noState,
+				noA11y: cmd.noA11y,
+			});
 		case "record.timeline":
 			return handleRecordTimeline(cmd.open, cmd.limit);
 		case "record.replay":

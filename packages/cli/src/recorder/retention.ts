@@ -37,6 +37,7 @@ interface CaptureRow {
 	tier: string;
 	pngPath: string;
 	snapshotPath: string | null;
+	axPath: string | null;
 	hash: string;
 }
 
@@ -49,7 +50,7 @@ export interface RetentionResult {
 function captureRows(store: RetentionStore, sessionName: string): CaptureRow[] {
 	return store
 		.query(
-			`SELECT id, ts, epoch_id, tier, png_path, snapshot_path, hash
+			`SELECT id, ts, epoch_id, tier, png_path, snapshot_path, ax_path, hash
 			 FROM captures WHERE session_id = ? ORDER BY id`,
 			[sessionName],
 		)
@@ -61,6 +62,7 @@ function captureRows(store: RetentionStore, sessionName: string): CaptureRow[] {
 			pngPath: String(row.png_path ?? ""),
 			snapshotPath:
 				row.snapshot_path == null ? null : String(row.snapshot_path),
+			axPath: row.ax_path == null ? null : String(row.ax_path),
 			hash: String(row.hash ?? ""),
 		}));
 }
@@ -128,8 +130,8 @@ function blobRefCount(
 	const rows = store.query(
 		`SELECT COUNT(*) AS c FROM captures
 		 WHERE session_id = ? AND tier != 'meta' AND id != ?
-		   AND (png_path = ? OR snapshot_path = ?)`,
-		[sessionName, exceptId, blobPath, blobPath],
+		   AND (png_path = ? OR snapshot_path = ? OR ax_path = ?)`,
+		[sessionName, exceptId, blobPath, blobPath, blobPath],
 	);
 	return Number(rows[0]?.c ?? 0);
 }
@@ -172,6 +174,7 @@ function liveBlobPaths(rows: CaptureRow[]): Set<string> {
 		if (row.tier === "meta") continue;
 		if (row.pngPath) paths.add(row.pngPath);
 		if (row.snapshotPath) paths.add(row.snapshotPath);
+		if (row.axPath) paths.add(row.axPath);
 	}
 	return paths;
 }
@@ -276,6 +279,15 @@ function decayToMeta(
 			store,
 			sessionName,
 			row.snapshotPath,
+			row.id,
+			result.deletedBlobs,
+		);
+	}
+	if (row.axPath) {
+		deleteBlobIfUnreferenced(
+			store,
+			sessionName,
+			row.axPath,
 			row.id,
 			result.deletedBlobs,
 		);

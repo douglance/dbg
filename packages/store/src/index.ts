@@ -14,7 +14,7 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const KNOWN_TABLES = [
 	"events",
@@ -25,6 +25,8 @@ const KNOWN_TABLES = [
 	"edits",
 	"state_snapshots",
 	"a11y_issues",
+	"taps",
+	"tap_hits",
 ];
 
 export interface EventRecord {
@@ -97,6 +99,25 @@ export interface A11yIssueRecord {
 	detail: string;
 }
 
+export interface TapRecord {
+	sessionId: string;
+	breakpointId: string;
+	file: string;
+	/** 1-based line as the user typed it. */
+	line: number;
+	expr: string;
+	urlRegex: string;
+	enabled?: boolean;
+	createdTs?: number;
+}
+
+export interface TapHitRecord {
+	tapId: number;
+	ts?: number;
+	/** The stringified expression value the logpoint emitted. */
+	value: string;
+}
+
 export interface RegionRecord {
 	diffId: number;
 	x: number;
@@ -127,6 +148,8 @@ export class EventStore {
 	private insertEditStmt!: StatementSync;
 	private insertStateSnapshotStmt!: StatementSync;
 	private insertA11yIssueStmt!: StatementSync;
+	private insertTapStmt!: StatementSync;
+	private insertTapHitStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -309,6 +332,37 @@ export class EventStore {
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_a11y_issues_capture_id ON a11y_issues(capture_id)",
 		);
+
+		// Taps (logpoints): a conditioned breakpoint that never pauses, emitting
+		// an expression value via a console sentinel. tap_hits records each fire.
+		// Metadata — never pruned by retention/TTL.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS taps (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				breakpoint_id TEXT NOT NULL,
+				file TEXT NOT NULL,
+				line INTEGER NOT NULL,
+				expr TEXT NOT NULL,
+				url_regex TEXT NOT NULL,
+				enabled INTEGER NOT NULL DEFAULT 1,
+				created_ts INTEGER NOT NULL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_taps_session_id ON taps(session_id)",
+		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS tap_hits (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				tap_id INTEGER NOT NULL,
+				ts INTEGER NOT NULL,
+				value TEXT NOT NULL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_tap_hits_tap_id ON tap_hits(tap_id)",
+		);
 	}
 
 	private prepareStatements(): void {
@@ -316,8 +370,8 @@ export class EventStore {
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",
 		);
 		this.insertCaptureStmt = this.db.prepare(
-			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path, tier)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path, ax_path, tier)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		this.insertEpochStmt = this.db.prepare(
 			"INSERT INTO epochs (ts, session_id, name, auto) VALUES (?, ?, ?, ?)",
@@ -338,6 +392,13 @@ export class EventStore {
 		);
 		this.insertA11yIssueStmt = this.db.prepare(
 			"INSERT INTO a11y_issues (ts, capture_id, rule, selector, detail) VALUES (?, ?, ?, ?, ?)",
+		);
+		this.insertTapStmt = this.db.prepare(
+			`INSERT INTO taps (session_id, breakpoint_id, file, line, expr, url_regex, enabled, created_ts)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		this.insertTapHitStmt = this.db.prepare(
+			"INSERT INTO tap_hits (tap_id, ts, value) VALUES (?, ?, ?)",
 		);
 	}
 
@@ -400,6 +461,7 @@ export class EventStore {
 			JSON.stringify(capture.hmrModules ?? []),
 			capture.epochId ?? null,
 			capture.snapshotPath ?? null,
+			capture.axPath ?? null,
 			capture.tier ?? "full",
 		);
 		return Number(result.lastInsertRowid);
@@ -491,6 +553,33 @@ export class EventStore {
 			ids.push(Number(result.lastInsertRowid));
 		}
 		return ids;
+	}
+
+	/** Insert a tap (logpoint) row; returns its id (-1 if closed). */
+	insertTap(tap: TapRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertTapStmt.run(
+			tap.sessionId,
+			tap.breakpointId,
+			tap.file,
+			tap.line,
+			tap.expr,
+			tap.urlRegex,
+			tap.enabled === false ? 0 : 1,
+			tap.createdTs ?? Date.now(),
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a tap-hit row; returns its id (-1 if closed). */
+	insertTapHit(hit: TapHitRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertTapHitStmt.run(
+			hit.tapId,
+			hit.ts ?? Date.now(),
+			hit.value,
+		);
+		return Number(result.lastInsertRowid);
 	}
 
 	/** Execute a write statement (UPDATE/DELETE); returns affected row count. */
