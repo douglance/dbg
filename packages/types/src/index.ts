@@ -275,6 +275,20 @@ export type Command =
 	| { cmd: "record.timeline"; open?: boolean }
 	// Restore a capture's URL/scroll in the recorder page.
 	| { cmd: "record.replay"; capture: number }
+	// One-off deliberate capture: URL, or a component file rendered in an
+	// esbuild harness (#ba-root). Launches a throwaway Chrome; `states` are
+	// forced via CSS.forcePseudoState and each produces its own PNG.
+	| {
+			cmd: "record.shoot";
+			target: string;
+			selector?: string;
+			viewport?: { width: number; height: number };
+			fullPage?: boolean;
+			states?: string[];
+			props?: string;
+			name?: string;
+			out?: string;
+	  }
 
 	// ─── Target/device enumeration (global) ───
 	// List debuggable targets at a port. No `session`: discovery endpoint.
@@ -377,6 +391,8 @@ export interface OkResponse {
 	regions?: AfterRegion[];
 	styleChanges?: AfterStyleChange[];
 	reportPath?: string;
+	// record.shoot results, one per captured state ("default" first)
+	shots?: Array<{ state: string; path: string }>;
 	lastErrorCode?: string;
 	lastErrorMessage?: string;
 	lastStopReason?: string;

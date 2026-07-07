@@ -5,7 +5,7 @@ context: fork
 license: MIT
 metadata:
   author: douglance
-  version: 0.3.0
+  version: 0.4.0
 ---
 
 # dbg - Stateless Debugger & Browser Automation
@@ -166,6 +166,41 @@ dbg coverage start                     # begin tracking JS + CSS usage
 dbg coverage stop
 dbg q "SELECT url, used_pct FROM coverage ORDER BY used_pct ASC"
 ```
+
+### Visual Flight Recorder (record → edit → after)
+
+```sh
+dbg record http://localhost:3000     # daemon launches headless Chrome, keeps recording
+dbg record http://localhost:3000 --viewport 1280x720   # WxH or preset (desktop|laptop|tablet|mobile)
+dbg mark before-fix                  # stamp a named epoch (auto-epochs happen on edit bursts)
+# ... edit code; saved files + vite HMR modules annotate captures automatically ...
+dbg after --json                     # capture now, diff vs anchor: pixels + component blame
+                                     #   + style deltas + new console/network errors + report.html
+dbg after --at mark:before-fix       # explicit anchors: capture:<id> | mark:<name> | time:<ts|10m> | file:<path>
+dbg timeline                         # filmstrip HTML of every capture with annotations
+dbg replay <captureId>               # restore a capture's URL/scroll in the recorder page
+dbg record --status                  # captureCount, epochCount, lastCaptureTs
+dbg record --stop                    # end recording, kill managed Chrome
+```
+
+`dbg after --json` returns `pair` (diffPercent, diffPixels, clusters), `regions`
+(diff clusters blamed to React component names, or tag.class on non-React pages;
+`causal: true` when the component's file was just edited), `styleChanges`
+(computed-style deltas like `padding-top: 8px → 40px`), `consoleDelta` /
+`exceptionDelta` / `networkDelta`, and `reportPath` (self-contained HTML with
+side-by-side / wipe / onion-skin / diff-overlay views). Add `--open` for humans.
+
+### Deliberate Captures (shoot)
+
+```sh
+dbg shoot http://localhost:3000 --selector "#nav" --states hover,focus
+dbg shoot src/Button.tsx --props '{"variant":"primary"}'   # esbuild harness renders
+                                     # the component with YOUR react-dom at #ba-root
+dbg shoot http://localhost:3000 --viewport mobile --full   # preset + full-page
+```
+
+Each state produces its own PNG under `.dbg/recordings/shots/`. For Storybook,
+shoot the story URL directly (e.g. `dbg shoot 'http://localhost:6006/iframe.html?id=button--primary'`).
 
 ### Apple Device / Simulator (iOS, tvOS, watchOS, visionOS)
 
@@ -370,6 +405,24 @@ dbg n
 dbg e "self.viewModel.state"
 dbg close
 ```
+
+## Visual Before/After Loop (agents)
+
+The recorder gives every code edit a visual paper trail — no window, no human:
+
+```sh
+dbg record http://localhost:3000     # 1. start recording (background, headless)
+dbg mark attempt-1                   # 2. stamp where you are
+# 3. edit code — file saves and HMR updates annotate captures automatically
+dbg after --json                     # 4. verdict: pixel diff % + blamed components
+                                     #    + style deltas + new errors, in one JSON
+# 5. iterate; when done, show report.html to the human (dbg after --open)
+dbg q "SELECT ts, changed_files, epoch_id FROM captures"   # the visual git log
+dbg record --stop
+```
+
+"Before" always exists retroactively: the anchor defaults to the last capture
+at the newest epoch, so you can edit first and ask questions later.
 
 ## Tips
 

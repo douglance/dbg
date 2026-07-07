@@ -192,6 +192,47 @@ dbg reconnect                 # reconnect to last known websocket URL
 | `dbg health` | Evaluate `1+1` on target, report latency in ms |
 | `dbg reconnect` | Reconnect to the last websocket URL from a previous session |
 
+### Visual Flight Recorder
+
+Record what the UI looks like over time — headless, in the background — and get
+before/after verdicts with component blame. Built for the agent loop
+**record → edit → after**:
+
+```sh
+dbg record http://localhost:3000    # daemon launches managed headless Chrome, keeps recording
+dbg mark before-fix                 # stamp a named epoch (auto-epochs from edit bursts)
+# ... edit code; saved files + vite HMR modules annotate captures ...
+dbg after --json                    # capture now, diff vs anchor
+dbg after --open                    # same, and open the HTML report for humans
+dbg timeline                        # filmstrip HTML of the whole recording
+dbg replay <captureId>              # restore a capture's URL/scroll
+dbg record --status | --stop
+```
+
+| Command | Description |
+|---|---|
+| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|laptop\|tablet\|mobile`, `--idle <ms>`) |
+| `dbg mark [name]` | Stamp a named epoch in the timeline |
+| `dbg after [name]` | Capture + diff vs anchor: `--at capture:<id>\|mark:<name>\|time:<ts\|10m>\|file:<path>`, `--open` |
+| `dbg timeline` | Self-contained filmstrip HTML (`--open`) |
+| `dbg replay <id>` | Restore a capture's URL/scroll in the recorder page |
+| `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full`, `--name`) |
+
+`dbg after` returns one JSON verdict: pixel diff (`pair.diffPercent`), changed
+regions blamed to **React component names** (`regions`, with `causal: true` when
+that component's file was just saved/HMR'd; tag.class labels on non-React
+pages), computed-style deltas (`styleChanges`), and new console/exception/
+network failures since the anchor — plus a self-contained `report.html`
+(side-by-side, wipe slider, onion skin, diff overlay with labeled regions).
+
+`dbg shoot Component.tsx` renders the component in an esbuild harness using
+*your* project's react-dom and screenshots `#ba-root`; `--states` forces
+`:hover`/`:focus`/etc. via CSS.forcePseudoState, one PNG per state. For
+Storybook, shoot the story iframe URL directly.
+
+Recorder data is queryable like everything else: `captures`, `epochs`, `diffs`,
+and `regions` tables (e.g. `dbg q "SELECT ts, changed_files, epoch_id FROM captures"`).
+
 ### Query Engine
 
 Everything the debugger can see is queryable with SQL:

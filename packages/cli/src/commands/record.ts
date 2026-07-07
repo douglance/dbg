@@ -4,10 +4,23 @@ import { type Cli, z } from "incur";
 import type { Command } from "@dbg/types";
 import { sendCommand } from "../daemon-client.js";
 
+export const VIEWPORT_PRESETS: Record<
+	string,
+	{ width: number; height: number }
+> = {
+	desktop: { width: 1280, height: 800 },
+	tablet: { width: 768, height: 1024 },
+	mobile: { width: 390, height: 844 },
+};
+
 export function parseViewport(raw: string): { width: number; height: number } {
+	const preset = VIEWPORT_PRESETS[raw.trim().toLowerCase()];
+	if (preset) return preset;
 	const match = /^(\d+)x(\d+)$/i.exec(raw.trim());
 	if (!match) {
-		throw new Error(`invalid viewport "${raw}" (expected WxH, e.g. 1280x720)`);
+		throw new Error(
+			`invalid viewport "${raw}" (expected WxH like 1280x720, or a preset: ${Object.keys(VIEWPORT_PRESETS).join(", ")})`,
+		);
 	}
 	const width = Number.parseInt(match[1], 10);
 	const height = Number.parseInt(match[2], 10);
@@ -117,6 +130,64 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 		}),
 		async run({ args }) {
 			return await sendCommand({ cmd: "record.replay", capture: args.capture });
+		},
+	});
+
+	cli.command("shoot", {
+		description:
+			"One-off deliberate capture: a URL, or a React component file rendered in an esbuild harness (#dbg-root). For Storybook, shoot the story URL directly (e.g. dbg shoot 'http://localhost:6006/iframe.html?id=button--primary')",
+		args: z.object({
+			target: z.string().describe("URL (http/https) or component path (.tsx)"),
+		}),
+		options: z.object({
+			selector: z
+				.string()
+				.optional()
+				.describe("Clip the capture (and force states) on this selector"),
+			viewport: z
+				.string()
+				.optional()
+				.describe("Viewport as WxH or preset (desktop, tablet, mobile)"),
+			fullPage: z
+				.boolean()
+				.optional()
+				.describe("Full-page capture (beyond the viewport)"),
+			out: z
+				.string()
+				.optional()
+				.describe("Output directory for PNGs (default .dbg/shots/)"),
+			states: z
+				.string()
+				.optional()
+				.describe(
+					"Comma-separated pseudo states to also capture (hover,focus,active,...)",
+				),
+			props: z
+				.string()
+				.optional()
+				.describe(
+					'Component props as JSON (harness mode), e.g. \'{"tone":"red"}\'',
+				),
+			name: z
+				.string()
+				.optional()
+				.describe("Base name for the output PNGs (default: component name)"),
+		}),
+		async run({ args, options }) {
+			const cmd: Command = { cmd: "record.shoot", target: args.target };
+			if (options.selector) cmd.selector = options.selector;
+			if (options.viewport) cmd.viewport = parseViewport(options.viewport);
+			if (options.fullPage) cmd.fullPage = true;
+			if (options.out) cmd.out = options.out;
+			if (options.states) {
+				cmd.states = options.states
+					.split(",")
+					.map((s) => s.trim())
+					.filter(Boolean);
+			}
+			if (options.props) cmd.props = options.props;
+			if (options.name) cmd.name = options.name;
+			return await sendCommand(cmd);
 		},
 	});
 

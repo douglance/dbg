@@ -147,7 +147,13 @@ describe.runIf(hasChrome)("component blame + style diff (e2e)", () => {
 		"blames ColorCard and reports its padding/color delta",
 		{ timeout: 120000 },
 		async () => {
-			const start = dbg("record", fixtureUrl, "--viewport", "800x600", "--json");
+			const start = dbg(
+				"record",
+				fixtureUrl,
+				"--viewport",
+				"800x600",
+				"--json",
+			);
 			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
 			const chromePid = (
 				JSON.parse(start.stdout) as { recording?: { pid?: number } }
@@ -192,10 +198,7 @@ describe.runIf(hasChrome)("component blame + style diff (e2e)", () => {
 			const cardRegion = response.regions?.find(
 				(r) => r.component === "ColorCard",
 			);
-			expect(
-				cardRegion,
-				JSON.stringify(response.regions),
-			).toBeDefined();
+			expect(cardRegion, JSON.stringify(response.regions)).toBeDefined();
 
 			// ── style diff: padding or color delta on the card ──
 			const cardChanges = (response.styleChanges ?? []).filter((c) =>

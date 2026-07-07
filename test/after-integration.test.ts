@@ -137,7 +137,13 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 		{ timeout: 120000 },
 		async () => {
 			// ── record + settle ──
-			const start = dbg("record", fixtureUrl, "--viewport", "800x600", "--json");
+			const start = dbg(
+				"record",
+				fixtureUrl,
+				"--viewport",
+				"800x600",
+				"--json",
+			);
 			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
 			const chromePid = (
 				JSON.parse(start.stdout) as { recording?: { pid?: number } }
@@ -249,8 +255,7 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 				"--json",
 			);
 			expect(diffs.exitCode, diffs.stdout + diffs.stderr).toBe(0);
-			const diffRows = (JSON.parse(diffs.stdout) as { rows: unknown[][] })
-				.rows;
+			const diffRows = (JSON.parse(diffs.stdout) as { rows: unknown[][] }).rows;
 			expect(diffRows.length).toBeGreaterThanOrEqual(1);
 			expect(Number(diffRows[0][3])).toBeGreaterThan(0);
 
@@ -274,9 +279,9 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 			expect((JSON.parse(replay.stdout) as { ok: boolean }).ok).toBe(true);
 			const href = dbg("e", "location.href", "--json");
 			expect(href.exitCode, href.stdout + href.stderr).toBe(0);
-			expect(
-				(JSON.parse(href.stdout) as { value?: string }).value,
-			).toBe(fixtureUrl);
+			expect((JSON.parse(href.stdout) as { value?: string }).value).toBe(
+				fixtureUrl,
+			);
 
 			// ── explicit anchors also resolve ──
 			const atCapture = dbg(
@@ -286,9 +291,7 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 				"--json",
 			);
 			expect(atCapture.exitCode, atCapture.stdout + atCapture.stderr).toBe(0);
-			expect(
-				(JSON.parse(atCapture.stdout) as { ok: boolean }).ok,
-			).toBe(true);
+			expect((JSON.parse(atCapture.stdout) as { ok: boolean }).ok).toBe(true);
 
 			// ── stop; no orphan Chrome ──
 			const stop = dbg("record", "--stop", "--json");

@@ -140,8 +140,7 @@ export function parseDomSnapshot(
 		if (cached !== undefined) return cached;
 		const segment = `${tagOf(n)}:nth-of-type(${nthOf(n)})`;
 		const parent = parentIndex[n];
-		const isRoot =
-			parent === undefined || parent < 0 || nodeType[parent] !== 1;
+		const isRoot = parent === undefined || parent < 0 || nodeType[parent] !== 1;
 		const path = isRoot ? segment : `${pathOf(parent)}>${segment}`;
 		pathCache.set(n, path);
 		return path;

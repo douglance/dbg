@@ -78,6 +78,8 @@ import {
 import { isIgnoredWatchPath } from "./recorder/watch.js";
 
 import { type ChildProcess, spawn } from "node:child_process";
+import * as http from "node:http";
+import * as os from "node:os";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 // ─── State ───
@@ -289,6 +291,10 @@ let recorder: RecorderState | null = null;
 // (record.start is still attaching/navigating). Tracked so daemon cleanup
 // never orphans it.
 let pendingChrome: LaunchedChrome | null = null;
+
+// Throwaway Chrome owned by an in-flight record.shoot. Tracked separately so
+// daemon cleanup never orphans it either.
+let shootChrome: LaunchedChrome | null = null;
 
 // ─── Lifecycle commands ───
 
@@ -1523,16 +1529,16 @@ function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
 			scrollY: Number(row.scroll_y ?? 0),
 			pngPath: String(row.png_path ?? ""),
 			changedFiles: safeJsonArray(row.changed_files),
-			snapshotPath: row.snapshot_path == null ? null : String(row.snapshot_path),
+			snapshotPath:
+				row.snapshot_path == null ? null : String(row.snapshot_path),
 		}));
 }
 
 function recorderEpochRows(sessionName: string): AnchorEpochRow[] {
 	return store
-		.query(
-			"SELECT id, ts, name FROM epochs WHERE session_id = ? ORDER BY id",
-			[sessionName],
-		)
+		.query("SELECT id, ts, name FROM epochs WHERE session_id = ? ORDER BY id", [
+			sessionName,
+		])
 		.map((row) => ({
 			id: Number(row.id),
 			ts: Number(row.ts),
@@ -1570,9 +1576,13 @@ function consoleDeltaSince(
 
 /** New network failures since anchorTs, read from recorded CDP events:
  * loadingFailed (any) and responseReceived with status >= 400. */
-function networkDeltaSince(
-	anchorTs: number,
-): Array<{ url: string; ts: number; method?: string; status?: number; error?: string }> {
+function networkDeltaSince(anchorTs: number): Array<{
+	url: string;
+	ts: number;
+	method?: string;
+	status?: number;
+	error?: string;
+}> {
 	const rows = store.query(
 		`SELECT ts, method, data FROM events
 		 WHERE source = 'cdp_recv'
@@ -1973,6 +1983,291 @@ async function handleRecordReplay(captureId: number): Promise<Response> {
 			`restored capture ${capture.id}: ${capture.url} @ scrollY ${capture.scrollY}`,
 		],
 	};
+}
+
+// ─── record.shoot (Phase 5): one-off deliberate captures ───
+
+const SHOOT_PSEUDO_STATES = new Set([
+	"hover",
+	"focus",
+	"active",
+	"visited",
+	"focus-within",
+	"focus-visible",
+]);
+
+interface ComponentHarness {
+	url: string;
+	close(): void;
+}
+
+/** Bundle a component file with the user's own react/react-dom (resolved
+ * from the component's directory) and serve it on an ephemeral port. */
+async function buildComponentHarness(
+	componentPath: string,
+	propsJson?: string,
+): Promise<ComponentHarness> {
+	let props: unknown = {};
+	if (propsJson) {
+		props = JSON.parse(propsJson); // caller surfaces parse errors
+	}
+	const entry = `
+		import * as React from "react";
+		import { createRoot } from "react-dom/client";
+		import * as Mod from ${JSON.stringify(componentPath)};
+		const Component = Mod.default ?? Object.values(Mod)[0];
+		createRoot(document.getElementById("ba-root")).render(
+			React.createElement(Component, ${JSON.stringify(props)}),
+		);
+	`;
+	const esbuild = await import("esbuild");
+	const result = await esbuild.build({
+		stdin: {
+			contents: entry,
+			resolveDir: path.dirname(componentPath),
+			loader: "tsx",
+		},
+		bundle: true,
+		write: false,
+		platform: "browser",
+		define: { "process.env.NODE_ENV": '"development"' },
+		jsx: "automatic",
+	});
+	const bundle = result.outputFiles?.[0]?.text ?? "";
+	const html =
+		'<!doctype html><html><head><meta charset="utf-8"><title>dbg shoot harness</title></head><body style="margin:0;padding:16px;background:#fff"><div id="ba-root"></div><script src="/bundle.js"></script></body></html>';
+
+	const server = http.createServer((req, res) => {
+		if (req.url?.startsWith("/bundle.js")) {
+			res.writeHead(200, { "content-type": "text/javascript" });
+			res.end(bundle);
+		} else {
+			res.writeHead(200, { "content-type": "text/html" });
+			res.end(html);
+		}
+	});
+	const port = await new Promise<number>((resolve, reject) => {
+		server.on("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			if (address && typeof address === "object") resolve(address.port);
+			else reject(new Error("harness server has no port"));
+		});
+	});
+	return {
+		url: `http://127.0.0.1:${port}/`,
+		close: () => server.close(),
+	};
+}
+
+async function forceShootPseudoState(
+	cdp: CdpClientWrapper,
+	selector: string,
+	classes: string[],
+): Promise<void> {
+	const doc = (await cdp.send("DOM.getDocument", { depth: 1 })) as {
+		root: { nodeId: number };
+	};
+	const found = (await cdp.send("DOM.querySelector", {
+		nodeId: doc.root.nodeId,
+		selector,
+	})) as { nodeId: number };
+	if (!found.nodeId) throw new Error(`selector not found: ${selector}`);
+	await cdp.send("CSS.forcePseudoState", {
+		nodeId: found.nodeId,
+		forcedPseudoClasses: classes,
+	});
+}
+
+async function shootCapture(
+	cdp: CdpClientWrapper,
+	outDir: string,
+	baseName: string,
+	stateName: string,
+	selector: string | null,
+	fullPage: boolean,
+): Promise<{ state: string; path: string }> {
+	let clip: Record<string, number> | null = null;
+	if (selector && !fullPage) {
+		const result = (await cdp.send("Runtime.evaluate", {
+			expression: `(() => {
+				const el = document.querySelector(${JSON.stringify(selector)});
+				if (!el) return "";
+				const r = el.getBoundingClientRect();
+				return JSON.stringify({ x: r.x, y: r.y, width: r.width, height: r.height });
+			})()`,
+			returnByValue: true,
+		})) as { result?: { value?: string } };
+		if (!result.result?.value) {
+			throw new Error(`selector not found: ${selector}`);
+		}
+		const rect = JSON.parse(result.result.value) as {
+			x: number;
+			y: number;
+			width: number;
+			height: number;
+		};
+		if (rect.width > 0 && rect.height > 0) {
+			clip = { ...rect, scale: 1 };
+		}
+	}
+	const shot = (await cdp.send("Page.captureScreenshot", {
+		format: "png",
+		...(fullPage ? { captureBeyondViewport: true } : {}),
+		...(clip ? { clip } : {}),
+	})) as { data: string };
+	fs.mkdirSync(outDir, { recursive: true });
+	const pngPath = path.join(outDir, `${baseName}-${stateName}.png`);
+	fs.writeFileSync(pngPath, Buffer.from(shot.data, "base64"));
+	return { state: stateName, path: pngPath };
+}
+
+async function handleRecordShoot(cmd: {
+	target: string;
+	selector?: string;
+	viewport?: { width: number; height: number };
+	fullPage?: boolean;
+	states?: string[];
+	props?: string;
+	name?: string;
+}): Promise<Response> {
+	const states = cmd.states ?? [];
+	for (const state of states) {
+		if (!SHOOT_PSEUDO_STATES.has(state)) {
+			return {
+				ok: false,
+				error: `unknown state "${state}" (expected: ${[...SHOOT_PSEUDO_STATES].join(", ")})`,
+			};
+		}
+	}
+	if (shootChrome) {
+		return { ok: false, error: "another shoot is in progress; retry shortly" };
+	}
+
+	const isUrl = /^https?:\/\//i.test(cmd.target);
+	let harness: ComponentHarness | null = null;
+	let url = cmd.target;
+	let selector = cmd.selector ?? null;
+	let baseName = cmd.name ?? "shot";
+	if (!isUrl) {
+		const componentPath = path.resolve(process.cwd(), cmd.target);
+		if (!fs.existsSync(componentPath)) {
+			return { ok: false, error: `component file not found: ${componentPath}` };
+		}
+		if (!cmd.name) {
+			baseName = path.basename(componentPath).replace(/\.[^.]+$/, "");
+		}
+		try {
+			harness = await buildComponentHarness(componentPath, cmd.props);
+		} catch (e) {
+			return {
+				ok: false,
+				error: `harness build failed: ${(e as Error).message}`,
+			};
+		}
+		url = harness.url;
+		selector = selector ?? "#ba-root";
+	}
+
+	const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-shoot-"));
+	let chrome: LaunchedChrome;
+	try {
+		chrome = await launchChrome({ profileDir });
+	} catch (e) {
+		harness?.close();
+		fs.rmSync(profileDir, { recursive: true, force: true });
+		return { ok: false, error: (e as Error).message };
+	}
+	shootChrome = chrome;
+
+	const state = createState();
+	const cdp = new CdpClientWrapper(state, store);
+	try {
+		const discoveryDeadline = Date.now() + 5000;
+		let discovered: Awaited<ReturnType<typeof discoverTarget>>;
+		for (;;) {
+			try {
+				discovered = await discoverTarget(chrome.port, "127.0.0.1", "page");
+				break;
+			} catch (e) {
+				if (Date.now() >= discoveryDeadline) throw e;
+				await new Promise((r) => setTimeout(r, 200));
+			}
+		}
+		await cdp.connect(discovered.wsUrl, "page");
+
+		const viewport = cmd.viewport ?? { width: 1280, height: 800 };
+		await cdp.send("Emulation.setDeviceMetricsOverride", {
+			width: viewport.width,
+			height: viewport.height,
+			deviceScaleFactor: 1,
+			mobile: false,
+		});
+
+		const nav = (await cdp.send("Page.navigate", { url })) as {
+			errorText?: string;
+		};
+		if (nav.errorText) throw new Error(`navigation failed: ${nav.errorText}`);
+		await waitForPageLoad(cdp, 10000);
+		// Let a harness (or late JS) paint before the deliberate capture.
+		await new Promise((r) => setTimeout(r, 400));
+
+		const outDir = path.join(process.cwd(), ".dbg", "recordings", "shots");
+		const shots: Array<{ state: string; path: string }> = [];
+		shots.push(
+			await shootCapture(
+				cdp,
+				outDir,
+				baseName,
+				"default",
+				selector,
+				cmd.fullPage ?? false,
+			),
+		);
+		for (const pseudo of states) {
+			await forceShootPseudoState(cdp, selector ?? "body", [pseudo]);
+			await new Promise((r) => setTimeout(r, 150));
+			shots.push(
+				await shootCapture(
+					cdp,
+					outDir,
+					baseName,
+					pseudo,
+					selector,
+					cmd.fullPage ?? false,
+				),
+			);
+			await forceShootPseudoState(cdp, selector ?? "body", []);
+		}
+
+		store.record(
+			{
+				source: "daemon",
+				category: "recording",
+				method: "record.shoot",
+				data: { target: cmd.target, states, shots: shots.map((s) => s.path) },
+			},
+			true,
+		);
+
+		return {
+			ok: true,
+			shots,
+			messages: shots.map((s) => `${s.state}: ${s.path}`),
+		};
+	} catch (e) {
+		return { ok: false, error: (e as Error).message };
+	} finally {
+		try {
+			await cdp.disconnect();
+		} catch {
+			// already gone
+		}
+		await chrome.kill();
+		shootChrome = null;
+		harness?.close();
+		fs.rmSync(profileDir, { recursive: true, force: true });
+	}
 }
 
 // ─── Target listing ───
@@ -2804,6 +3099,8 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleRecordTimeline(cmd.open);
 		case "record.replay":
 			return handleRecordReplay(cmd.capture);
+		case "record.shoot":
+			return handleRecordShoot(cmd);
 	}
 
 	// Session-scoped commands share an optional `session` field.
@@ -3052,6 +3349,10 @@ function startServer(): void {
 		if (pendingChrome) {
 			void pendingChrome.kill();
 			pendingChrome = null;
+		}
+		if (shootChrome) {
+			void shootChrome.kill();
+			shootChrome = null;
 		}
 		for (const session of registry.sessions.values()) {
 			if (session.managedChild) {

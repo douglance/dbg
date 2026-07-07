@@ -144,11 +144,7 @@ describe("buildRegions", () => {
 	});
 
 	it("marks causal when the component file matches a changed file", () => {
-		const regions = buildRegions(
-			clusters,
-			[body, card],
-			["src/ColorCard.tsx"],
-		);
+		const regions = buildRegions(clusters, [body, card], ["src/ColorCard.tsx"]);
 		expect(regions[0].causal).toBe(true);
 	});
 

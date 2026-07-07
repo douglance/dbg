@@ -5,17 +5,7 @@ import type { VirtualTable } from "@dbg/query";
 
 export const regionsTable: VirtualTable = {
 	name: "regions",
-	columns: [
-		"id",
-		"diff_id",
-		"x",
-		"y",
-		"w",
-		"h",
-		"component",
-		"file",
-		"causal",
-	],
+	columns: ["id", "diff_id", "x", "y", "w", "h", "component", "file", "causal"],
 	async fetch(_where, executor) {
 		const store = executor.getStore?.();
 		if (!store) {

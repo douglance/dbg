@@ -10,7 +10,9 @@ import { EventStore, SCHEMA_VERSION } from "../packages/store/src/index.js";
 
 const require = createRequire(import.meta.url);
 const { DatabaseSync } = require("node:sqlite") as {
-	DatabaseSync: new (path: string) => {
+	DatabaseSync: new (
+		path: string,
+	) => {
 		exec(sql: string): void;
 		prepare(sql: string): {
 			get(...p: unknown[]): Record<string, unknown> | undefined;

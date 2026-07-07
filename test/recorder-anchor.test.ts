@@ -96,8 +96,7 @@ describe("resolveAnchor", () => {
 
 	it("mark: last capture at/before the named epoch", () => {
 		expect(
-			resolveAnchor({ kind: "mark", name: "checkpoint" }, CAPTURES, EPOCHS)
-				?.id,
+			resolveAnchor({ kind: "mark", name: "checkpoint" }, CAPTURES, EPOCHS)?.id,
 		).toBe(2);
 		expect(
 			resolveAnchor({ kind: "mark", name: "missing" }, CAPTURES, EPOCHS),
@@ -105,13 +104,15 @@ describe("resolveAnchor", () => {
 	});
 
 	it("time: last capture at/before ts; first capture when earlier than all", () => {
-		expect(resolveAnchor({ kind: "time", ts: 2500 }, CAPTURES, EPOCHS)?.id).toBe(
-			2,
+		expect(
+			resolveAnchor({ kind: "time", ts: 2500 }, CAPTURES, EPOCHS)?.id,
+		).toBe(2);
+		expect(
+			resolveAnchor({ kind: "time", ts: 3000 }, CAPTURES, EPOCHS)?.id,
+		).toBe(3);
+		expect(resolveAnchor({ kind: "time", ts: 1 }, CAPTURES, EPOCHS)?.id).toBe(
+			1,
 		);
-		expect(resolveAnchor({ kind: "time", ts: 3000 }, CAPTURES, EPOCHS)?.id).toBe(
-			3,
-		);
-		expect(resolveAnchor({ kind: "time", ts: 1 }, CAPTURES, EPOCHS)?.id).toBe(1);
 	});
 
 	it("file: the capture before the first capture carrying the file", () => {

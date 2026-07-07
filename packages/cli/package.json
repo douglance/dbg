@@ -1,6 +1,6 @@
 {
 	"name": "@dbg/cli",
-	"version": "0.3.0",
+	"version": "0.4.0",
 	"private": true,
 	"type": "module",
 	"bin": {
@@ -28,6 +28,7 @@
 		"@dbg/tables-native": "workspace:*",
 		"@dbg/tables-recorder": "workspace:*",
 		"@dbg/types": "workspace:*",
+		"esbuild": "^0.25.0",
 		"incur": "^0.4.3"
 	},
 	"scripts": {

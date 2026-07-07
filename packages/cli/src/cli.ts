@@ -20,7 +20,7 @@ import { registerRecordCommands } from "./commands/record.js";
 const cli = Cli.create("dbg", {
 	description:
 		"Stateless CLI debugger for AI agents. One command in, one response out; a background daemon holds CDP/DAP connections between calls.",
-	version: "0.3.0",
+	version: "0.4.0",
 });
 
 registerLifecycleCommands(cli);

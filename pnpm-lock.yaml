@@ -116,6 +116,9 @@ importers:
       '@dbg/types':
         specifier: workspace:*
         version: link:../types
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
       incur:
         specifier: ^0.4.3
         version: 0.4.3
