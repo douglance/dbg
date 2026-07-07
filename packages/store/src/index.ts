@@ -39,6 +39,16 @@ export interface EpochRecord {
 	auto?: boolean;
 }
 
+export interface DiffRecord {
+	ts?: number;
+	name: string;
+	baselineCaptureId: number;
+	afterCaptureId: number;
+	diffPercent: number;
+	diffPixels: number;
+	reportPath: string;
+}
+
 interface PendingEvent {
 	ts: number;
 	source: string;
@@ -53,6 +63,7 @@ export class EventStore {
 	private insertStmt: StatementSync;
 	private insertCaptureStmt: StatementSync;
 	private insertEpochStmt: StatementSync;
+	private insertDiffStmt: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -115,6 +126,19 @@ export class EventStore {
 			)
 		`);
 		this.db.exec("CREATE INDEX IF NOT EXISTS idx_epochs_ts ON epochs(ts)");
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS diffs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				name TEXT NOT NULL,
+				baseline_capture_id INTEGER NOT NULL,
+				after_capture_id INTEGER NOT NULL,
+				diff_percent REAL NOT NULL,
+				diff_pixels INTEGER NOT NULL,
+				report_path TEXT NOT NULL
+			)
+		`);
+		this.db.exec("CREATE INDEX IF NOT EXISTS idx_diffs_ts ON diffs(ts)");
 
 		this.insertStmt = this.db.prepare(
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",
@@ -125,6 +149,10 @@ export class EventStore {
 		);
 		this.insertEpochStmt = this.db.prepare(
 			"INSERT INTO epochs (ts, session_id, name, auto) VALUES (?, ?, ?, ?)",
+		);
+		this.insertDiffStmt = this.db.prepare(
+			`INSERT INTO diffs (ts, name, baseline_capture_id, after_capture_id, diff_percent, diff_pixels, report_path)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		);
 
 		this.flushTimer = setInterval(() => {
@@ -191,6 +219,21 @@ export class EventStore {
 			JSON.stringify(capture.changedFiles ?? []),
 			JSON.stringify(capture.hmrModules ?? []),
 			capture.epochId ?? null,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a pixel-diff result row; returns its id (-1 if the store is closed). */
+	insertDiff(diff: DiffRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertDiffStmt.run(
+			diff.ts ?? Date.now(),
+			diff.name,
+			diff.baselineCaptureId,
+			diff.afterCaptureId,
+			diff.diffPercent,
+			diff.diffPixels,
+			diff.reportPath,
 		);
 		return Number(result.lastInsertRowid);
 	}

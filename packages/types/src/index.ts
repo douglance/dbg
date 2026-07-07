@@ -267,6 +267,14 @@ export type Command =
 	| { cmd: "record.status" }
 	// Stamp a named epoch (auto=0) in the recording timeline.
 	| { cmd: "record.mark"; name?: string }
+	// Capture now and diff vs an anchor capture (see AnchorSpec kinds):
+	// at = "capture:<id>" | "mark:<name>" | "time:<ts>" | "file:<path>".
+	// Writes report.html; open=true additionally spawns `open`.
+	| { cmd: "record.after"; at?: string; open?: boolean }
+	// Render the timeline filmstrip HTML from recorded captures.
+	| { cmd: "record.timeline"; open?: boolean }
+	// Restore a capture's URL/scroll in the recorder page.
+	| { cmd: "record.replay"; capture: number }
 
 	// ─── Target/device enumeration (global) ───
 	// List debuggable targets at a port. No `session`: discovery endpoint.
@@ -286,6 +294,31 @@ export type Command =
 	| SessionScoped<{ cmd: "memory"; address: string; length: number }>
 	// Disassemble around `address`, or the current frame when omitted.
 	| SessionScoped<{ cmd: "disasm"; address?: string }>;
+
+export interface AfterDeltaEntry {
+	type: string;
+	text: string;
+	ts: number;
+}
+
+export interface AfterNetworkFailure {
+	url: string;
+	ts: number;
+	method?: string;
+	status?: number;
+	error?: string;
+}
+
+export interface AfterPair {
+	name: string;
+	baseline: { captureId: number; ts: number };
+	after: { captureId: number; ts: number };
+	diffPercent: number;
+	diffPixels: number;
+	dimensionsChanged: boolean;
+	/** Number of changed-pixel clusters. */
+	clusters: number;
+}
 
 export interface RecordingStatus {
 	running: boolean;
@@ -319,6 +352,12 @@ export interface OkResponse {
 	s?: string;
 	sessions?: SessionInfo[];
 	recording?: RecordingStatus;
+	// record.after result (dbg after)
+	pair?: AfterPair;
+	consoleDelta?: { new: AfterDeltaEntry[] };
+	exceptionDelta?: { new: AfterDeltaEntry[] };
+	networkDelta?: { failed: AfterNetworkFailure[] };
+	reportPath?: string;
 	lastErrorCode?: string;
 	lastErrorMessage?: string;
 	lastStopReason?: string;

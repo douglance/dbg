@@ -77,6 +77,9 @@ importers:
       '@dbg/adapter-dap':
         specifier: workspace:*
         version: link:../adapter-dap
+      '@dbg/diff':
+        specifier: workspace:*
+        version: link:../diff
       '@dbg/launcher':
         specifier: workspace:*
         version: link:../launcher
@@ -86,6 +89,9 @@ importers:
       '@dbg/query':
         specifier: workspace:*
         version: link:../query
+      '@dbg/report':
+        specifier: workspace:*
+        version: link:../report
       '@dbg/store':
         specifier: workspace:*
         version: link:../store

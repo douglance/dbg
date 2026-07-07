@@ -12,6 +12,9 @@ import {
 	listTargets,
 } from "@dbg/adapter-cdp";
 import { DapClientWrapper } from "@dbg/adapter-dap";
+import { diffPngs } from "@dbg/diff";
+import { renderReport, renderTimeline } from "@dbg/report";
+import type { TimelineFrame } from "@dbg/report";
 import { type LaunchedChrome, launchChrome } from "@dbg/launcher";
 import {
 	ATTACH_PLATFORMS,
@@ -59,10 +62,16 @@ import {
 	handleTrace,
 } from "./commands.js";
 import { killTarget, spawnTarget } from "./process.js";
+import {
+	type AnchorCaptureRow,
+	type AnchorEpochRow,
+	parseAnchorSpec,
+	resolveAnchor,
+} from "./recorder/anchor.js";
 import { parseHmrModules } from "./recorder/hmr.js";
 import { isIgnoredWatchPath } from "./recorder/watch.js";
 
-import type { ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 
 // ─── State ───
 
@@ -997,6 +1006,7 @@ async function waitForPageLoad(
 async function captureRecorderFrame(
 	session: Session,
 	recordingDir: string,
+	opts?: { force?: boolean },
 ): Promise<{ id: number; pngPath: string; hash: string } | null> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) throw new Error("recorder session is not a cdp session");
@@ -1007,7 +1017,7 @@ async function captureRecorderFrame(
 	const buffer = Buffer.from(shot.data, "base64");
 	const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 16);
 
-	if (recorder && recorder.lastHash === hash) return null;
+	if (!opts?.force && recorder && recorder.lastHash === hash) return null;
 
 	const ts = Date.now();
 	fs.mkdirSync(recordingDir, { recursive: true });
@@ -1088,6 +1098,24 @@ function triggerRecorderCapture(_reason: string): Promise<void> {
 	};
 	r.captureChain = r.captureChain.then(run, run);
 	return r.captureChain;
+}
+
+/** Force a capture on demand (bypasses hash dedupe), serialized on the
+ * capture chain. Used by record.after; Phase 4+ can reuse it. */
+async function forceRecorderCapture(
+	session: Session,
+): Promise<{ id: number; pngPath: string; hash: string } | null> {
+	const r = recorder;
+	if (!r) return null;
+	let out: { id: number; pngPath: string; hash: string } | null = null;
+	const run = async () => {
+		if (recorder !== r) return;
+		out = await captureRecorderFrame(session, r.recordingDir, { force: true });
+	};
+	const chained = r.captureChain.then(run, run);
+	r.captureChain = chained.catch(() => {});
+	await chained;
+	return out;
 }
 
 /** Main-frame navigation: wait for load, refresh cached dpr, capture. */
@@ -1429,6 +1457,428 @@ async function handleRecordStatus(): Promise<Response> {
 				recorder.lastCaptureTs ?? recorderLastCaptureTs(recorder.sessionName),
 			session: recorder.sessionName,
 		},
+	};
+}
+
+// ─── record.after / record.timeline / record.replay (Phase 3) ───
+
+function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
+	return store
+		.query(
+			`SELECT id, ts, url, scroll_y, png_path, changed_files
+			 FROM captures WHERE session_id = ? ORDER BY id`,
+			[sessionName],
+		)
+		.map((row) => ({
+			id: Number(row.id),
+			ts: Number(row.ts),
+			url: String(row.url ?? ""),
+			scrollY: Number(row.scroll_y ?? 0),
+			pngPath: String(row.png_path ?? ""),
+			changedFiles: safeJsonArray(row.changed_files),
+		}));
+}
+
+function recorderEpochRows(sessionName: string): AnchorEpochRow[] {
+	return store
+		.query(
+			"SELECT id, ts, name FROM epochs WHERE session_id = ? ORDER BY id",
+			[sessionName],
+		)
+		.map((row) => ({
+			id: Number(row.id),
+			ts: Number(row.ts),
+			name: row.name == null ? null : String(row.name),
+		}));
+}
+
+function safeJsonArray(value: unknown): string[] {
+	try {
+		const parsed = JSON.parse(String(value ?? "[]")) as unknown;
+		return Array.isArray(parsed) ? parsed.map(String) : [];
+	} catch {
+		return [];
+	}
+}
+
+/** Console/exception entries newer than anchorTs, deduped by type+text
+ * (Chrome reports console.error via both Runtime and Log domains). */
+function consoleDeltaSince(
+	session: Session,
+	anchorTs: number,
+): { errors: Array<{ type: string; text: string; ts: number }> } {
+	const seen = new Set<string>();
+	const errors: Array<{ type: string; text: string; ts: number }> = [];
+	for (const entry of session.state.console) {
+		if (entry.ts <= anchorTs) continue;
+		if (entry.type !== "error" && entry.type !== "assert") continue;
+		const key = `${entry.type}|${entry.text}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		errors.push({ type: entry.type, text: entry.text, ts: entry.ts });
+	}
+	return { errors };
+}
+
+/** New network failures since anchorTs, read from recorded CDP events:
+ * loadingFailed (any) and responseReceived with status >= 400. */
+function networkDeltaSince(
+	anchorTs: number,
+): Array<{ url: string; ts: number; method?: string; status?: number; error?: string }> {
+	const rows = store.query(
+		`SELECT ts, method, data FROM events
+		 WHERE source = 'cdp_recv'
+		   AND method IN ('Network.requestWillBeSent','Network.responseReceived','Network.loadingFailed')
+		   AND ts > ?
+		 ORDER BY id`,
+		[anchorTs - 60000],
+	);
+	const requestUrls = new Map<string, { url: string; method?: string }>();
+	const failures: Array<{
+		url: string;
+		ts: number;
+		method?: string;
+		status?: number;
+		error?: string;
+	}> = [];
+	for (const row of rows) {
+		let data: {
+			event?: {
+				requestId?: string;
+				request?: { url?: string; method?: string };
+				response?: { url?: string; status?: number };
+				errorText?: string;
+			};
+		};
+		try {
+			data = JSON.parse(String(row.data ?? "{}"));
+		} catch {
+			continue;
+		}
+		const event = data.event;
+		if (!event) continue;
+		const ts = Number(row.ts);
+		if (row.method === "Network.requestWillBeSent") {
+			if (event.requestId && event.request?.url) {
+				requestUrls.set(event.requestId, {
+					url: event.request.url,
+					method: event.request.method,
+				});
+			}
+		} else if (ts > anchorTs && row.method === "Network.loadingFailed") {
+			const req = event.requestId ? requestUrls.get(event.requestId) : null;
+			failures.push({
+				url: req?.url ?? "(unknown)",
+				ts,
+				method: req?.method,
+				error: event.errorText ?? "failed",
+			});
+		} else if (
+			ts > anchorTs &&
+			row.method === "Network.responseReceived" &&
+			(event.response?.status ?? 0) >= 400
+		) {
+			const req = event.requestId ? requestUrls.get(event.requestId) : null;
+			failures.push({
+				url: event.response?.url ?? req?.url ?? "(unknown)",
+				ts,
+				method: req?.method,
+				status: event.response?.status,
+			});
+		}
+	}
+	return failures;
+}
+
+/** Navigate/scroll the recorder page back to a capture's state. */
+async function restoreRecorderState(
+	cdp: CdpClientWrapper,
+	target: { url: string; scrollY: number },
+): Promise<void> {
+	let currentUrl = "";
+	try {
+		const result = (await cdp.send("Runtime.evaluate", {
+			expression: "location.href",
+			returnByValue: true,
+		})) as { result?: { value?: unknown } };
+		currentUrl = String(result.result?.value ?? "");
+	} catch {
+		// treat as unknown; navigate below
+	}
+	if (target.url && currentUrl !== target.url) {
+		await cdp.send("Page.navigate", { url: target.url });
+		await waitForPageLoad(cdp, 10000);
+		if (recorder) recorder.dpr = await evaluateRecorderDpr(cdp);
+	}
+	try {
+		await cdp.send("Runtime.evaluate", {
+			expression: `window.scrollTo(0, ${Number(target.scrollY) || 0})`,
+			returnByValue: true,
+		});
+	} catch {
+		// best-effort
+	}
+}
+
+function recordingsRootDir(): string {
+	return path.join(process.cwd(), ".dbg", "recordings");
+}
+
+function openInBrowser(filePath: string): void {
+	try {
+		spawn("open", [filePath], { detached: true, stdio: "ignore" }).unref();
+	} catch {
+		// never fail the command because `open` is unavailable
+	}
+}
+
+async function handleRecordAfter(
+	at?: string,
+	open?: boolean,
+): Promise<Response> {
+	if (!recorder) {
+		return {
+			ok: false,
+			error: "no recording in progress (dbg record <url> first)",
+		};
+	}
+	const session = registry.sessions.get(recorder.sessionName);
+	const cdp = session ? asCdpExecutor(session) : null;
+	if (!session || !cdp) {
+		return { ok: false, error: "recorder session unavailable" };
+	}
+
+	const spec = parseAnchorSpec(at);
+	if ("error" in spec) return { ok: false, error: spec.error };
+
+	const captures = recorderCaptureRows(recorder.sessionName);
+	const epochs = recorderEpochRows(recorder.sessionName);
+	const anchor = resolveAnchor(spec, captures, epochs);
+	if (!anchor) {
+		return {
+			ok: false,
+			error: `no anchor capture found for --at "${at ?? "(default)"}"`,
+		};
+	}
+
+	let beforePng: Buffer;
+	try {
+		beforePng = fs.readFileSync(anchor.pngPath);
+	} catch {
+		return {
+			ok: false,
+			error: `anchor capture PNG missing: ${anchor.pngPath}`,
+		};
+	}
+
+	try {
+		await restoreRecorderState(cdp, anchor);
+		const frame = await forceRecorderCapture(session);
+		if (!frame) {
+			return { ok: false, error: "fresh capture failed" };
+		}
+		const afterPng = fs.readFileSync(frame.pngPath);
+		const diff = diffPngs(beforePng, afterPng);
+
+		const consoleNew = consoleDeltaSince(session, anchor.ts).errors;
+		const exceptionsNew = session.state.exceptions
+			.filter((e) => e.ts > anchor.ts)
+			.map((e) => ({ type: e.type, text: e.text, ts: e.ts }));
+		const networkNew = networkDeltaSince(anchor.ts);
+
+		const root = recordingsRootDir();
+		fs.mkdirSync(root, { recursive: true });
+		// PNG diff lives next to the captures it compares.
+		const diffPngPath = path.join(
+			recorder.recordingDir,
+			`diff-${anchor.id}-${frame.id}.png`,
+		);
+		fs.writeFileSync(diffPngPath, diff.diffPng);
+
+		const pairName = `capture ${anchor.id} → capture ${frame.id}`;
+		const anchorLabel = `capture:${anchor.id} (${new Date(anchor.ts).toISOString()})`;
+		const reportPath = path.join(root, "report.html");
+		const html = renderReport({
+			pairs: [
+				{
+					name: pairName,
+					beforePng,
+					afterPng,
+					diffPng: diff.diffPng,
+					stats: {
+						diffPixels: diff.diffPixels,
+						totalPixels: diff.totalPixels,
+						diffPercent: diff.diffPercent,
+						width: diff.width,
+						height: diff.height,
+						dimensionsChanged: diff.dimensionsChanged,
+					},
+					newErrors: [...consoleNew, ...exceptionsNew],
+					newNetworkFailures: networkNew.map((f) => ({
+						url: f.url,
+						ts: f.ts,
+						method: f.method,
+						status: f.status,
+						text: f.error,
+					})),
+				},
+			],
+			meta: {
+				generatedAt: new Date().toISOString(),
+				anchor: anchorLabel,
+			},
+		});
+		fs.writeFileSync(reportPath, html);
+		if (open) openInBrowser(reportPath);
+
+		const diffId = store.insertDiff({
+			name: pairName,
+			baselineCaptureId: anchor.id,
+			afterCaptureId: frame.id,
+			diffPercent: diff.diffPercent,
+			diffPixels: diff.diffPixels,
+			reportPath,
+		});
+		store.record(
+			{
+				source: "daemon",
+				category: "recording",
+				method: "record.after",
+				data: { diffId, baseline: anchor.id, after: frame.id },
+				sessionId: recorder.sessionName,
+			},
+			true,
+		);
+
+		const afterTs = recorder.lastCaptureTs ?? Date.now();
+		return {
+			ok: true,
+			messages: [
+				`${diff.diffPercent.toFixed(2)}% changed vs ${anchorLabel}`,
+				`diff png: ${diffPngPath}`,
+				`report: ${reportPath}`,
+			],
+			pair: {
+				name: pairName,
+				baseline: { captureId: anchor.id, ts: anchor.ts },
+				after: { captureId: frame.id, ts: afterTs },
+				diffPercent: diff.diffPercent,
+				diffPixels: diff.diffPixels,
+				dimensionsChanged: diff.dimensionsChanged,
+				clusters: diff.clusters.length,
+			},
+			consoleDelta: { new: consoleNew },
+			exceptionDelta: { new: exceptionsNew },
+			networkDelta: { failed: networkNew },
+			reportPath,
+		};
+	} catch (e) {
+		return { ok: false, error: (e as Error).message };
+	}
+}
+
+async function handleRecordTimeline(open?: boolean): Promise<Response> {
+	const captures = recorderCaptureRows(RECORDER_SESSION);
+	if (captures.length === 0) {
+		return { ok: false, error: "no captures recorded yet" };
+	}
+	const epochNames = new Map<number, string>();
+	for (const epoch of recorderEpochRows(RECORDER_SESSION)) {
+		epochNames.set(epoch.id, epoch.name ?? `auto ${epoch.id}`);
+	}
+	const rows = store.query(
+		`SELECT id, ts, url, hmr_modules, epoch_id, png_path, changed_files
+		 FROM captures WHERE session_id = ? ORDER BY id`,
+		[RECORDER_SESSION],
+	);
+	const frames: TimelineFrame[] = [];
+	for (const row of rows) {
+		let thumbPng: Buffer;
+		try {
+			thumbPng = fs.readFileSync(String(row.png_path));
+		} catch {
+			continue; // pruned/missing PNGs simply drop out of the strip
+		}
+		const epochId = row.epoch_id == null ? null : Number(row.epoch_id);
+		frames.push({
+			id: Number(row.id),
+			ts: Number(row.ts),
+			thumbPng,
+			url: String(row.url ?? ""),
+			changedFiles: safeJsonArray(row.changed_files),
+			hmrModules: safeJsonArray(row.hmr_modules),
+			epochName: epochId == null ? undefined : epochNames.get(epochId),
+		});
+	}
+	// Per-capture console error counts: bucket each error into the last frame
+	// at/before its timestamp (live session state; empty once recording stops).
+	const session = registry.sessions.get(RECORDER_SESSION);
+	if (session && frames.length > 0) {
+		const counts = new Map<number, number>();
+		const seen = new Set<string>();
+		for (const entry of session.state.console) {
+			if (entry.type !== "error" && entry.type !== "assert") continue;
+			// Chrome reports console.error via both Runtime and Log domains;
+			// collapse duplicates within a 1s window.
+			const key = `${entry.type}|${entry.text}|${Math.floor(entry.ts / 1000)}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			let bucket = -1;
+			for (let i = 0; i < frames.length; i++) {
+				if (frames[i].ts <= entry.ts) bucket = i;
+				else break;
+			}
+			if (bucket >= 0) counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+		}
+		for (const [index, count] of counts) {
+			frames[index].logCounts = { error: count };
+		}
+	}
+	const root = recordingsRootDir();
+	fs.mkdirSync(root, { recursive: true });
+	const timelinePath = path.join(root, "timeline.html");
+	fs.writeFileSync(
+		timelinePath,
+		renderTimeline({
+			frames,
+			meta: { generatedAt: new Date().toISOString() },
+		}),
+	);
+	if (open) openInBrowser(timelinePath);
+	return {
+		ok: true,
+		messages: [`timeline (${frames.length} frames): ${timelinePath}`],
+	};
+}
+
+async function handleRecordReplay(captureId: number): Promise<Response> {
+	if (!recorder) {
+		return {
+			ok: false,
+			error: "no recording in progress (dbg record <url> first)",
+		};
+	}
+	const session = registry.sessions.get(recorder.sessionName);
+	const cdp = session ? asCdpExecutor(session) : null;
+	if (!session || !cdp) {
+		return { ok: false, error: "recorder session unavailable" };
+	}
+	const capture = recorderCaptureRows(recorder.sessionName).find(
+		(c) => c.id === captureId,
+	);
+	if (!capture) {
+		return { ok: false, error: `unknown capture: ${captureId}` };
+	}
+	try {
+		await restoreRecorderState(cdp, capture);
+	} catch (e) {
+		return { ok: false, error: (e as Error).message };
+	}
+	return {
+		ok: true,
+		messages: [
+			`restored capture ${capture.id}: ${capture.url} @ scrollY ${capture.scrollY}`,
+		],
 	};
 }
 
@@ -2255,6 +2705,12 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleRecordStatus();
 		case "record.mark":
 			return handleRecordMark(cmd.name);
+		case "record.after":
+			return handleRecordAfter(cmd.at, cmd.open);
+		case "record.timeline":
+			return handleRecordTimeline(cmd.open);
+		case "record.replay":
+			return handleRecordReplay(cmd.capture);
 	}
 
 	// Session-scoped commands share an optional `session` field.

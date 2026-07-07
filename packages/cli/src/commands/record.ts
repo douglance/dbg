@@ -67,6 +67,59 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 		},
 	});
 
+	cli.command("after", {
+		description:
+			"Capture now and diff vs an anchor: pixels + new console errors + new network failures; writes report.html",
+		args: z.object({
+			name: z
+				.string()
+				.optional()
+				.describe("Mark name to anchor at (shorthand for --at mark:<name>)"),
+		}),
+		options: z.object({
+			at: z
+				.string()
+				.optional()
+				.describe(
+					"Anchor: capture:<id> | mark:<name> | time:<ts> | file:<path> (default: latest epoch, else first capture)",
+				),
+			open: z.boolean().optional().describe("Open report.html in a browser"),
+		}),
+		async run({ args, options }) {
+			const cmd: Command = { cmd: "record.after" };
+			if (options.at && args.name) {
+				throw new Error("pass either a mark name or --at, not both");
+			}
+			if (options.at) cmd.at = options.at;
+			else if (args.name) cmd.at = `mark:${args.name}`;
+			if (options.open) cmd.open = true;
+			return await sendCommand(cmd);
+		},
+	});
+
+	cli.command("timeline", {
+		description:
+			"Render the recording as a filmstrip HTML page (frames annotated with saved files / HMR modules / epochs)",
+		options: z.object({
+			open: z.boolean().optional().describe("Open timeline.html in a browser"),
+		}),
+		async run({ options }) {
+			const cmd: Command = { cmd: "record.timeline" };
+			if (options.open) cmd.open = true;
+			return await sendCommand(cmd);
+		},
+	});
+
+	cli.command("replay", {
+		description: "Restore a capture's URL/scroll in the recorder page",
+		args: z.object({
+			capture: z.coerce.number().int().positive().describe("Capture id"),
+		}),
+		async run({ args }) {
+			return await sendCommand({ cmd: "record.replay", capture: args.capture });
+		},
+	});
+
 	cli.command("mark", {
 		description:
 			"Stamp a named epoch in the recording timeline (auto-epochs from edit bursts exist regardless)",
