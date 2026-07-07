@@ -14,7 +14,7 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 6;
 
 const KNOWN_TABLES = [
 	"events",
@@ -23,6 +23,8 @@ const KNOWN_TABLES = [
 	"diffs",
 	"regions",
 	"edits",
+	"state_snapshots",
+	"a11y_issues",
 ];
 
 export interface EventRecord {
@@ -46,6 +48,8 @@ export interface CaptureRecord {
 	hmrModules?: string[];
 	epochId?: number | null;
 	snapshotPath?: string | null;
+	/** Gzipped Accessibility.getFullAXTree blob path (retention-managed). */
+	axPath?: string | null;
 	/** Retention tier: 'full' (default) | 'thumb' | 'meta'. */
 	tier?: CaptureTier;
 }
@@ -76,6 +80,23 @@ export interface EditRecord {
 	sessionId: string;
 }
 
+export interface StateSnapshotRecord {
+	ts?: number;
+	captureId: number;
+	/** 'localStorage' | 'sessionStorage'. */
+	kind: string;
+	/** JSON string of the storage entries at capture time. */
+	data: string;
+}
+
+export interface A11yIssueRecord {
+	ts?: number;
+	captureId: number;
+	rule: string;
+	selector: string;
+	detail: string;
+}
+
 export interface RegionRecord {
 	diffId: number;
 	x: number;
@@ -104,6 +125,8 @@ export class EventStore {
 	private insertDiffStmt!: StatementSync;
 	private insertRegionStmt!: StatementSync;
 	private insertEditStmt!: StatementSync;
+	private insertStateSnapshotStmt!: StatementSync;
+	private insertA11yIssueStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -193,6 +216,7 @@ export class EventStore {
 				hmr_modules TEXT NOT NULL DEFAULT '[]',
 				epoch_id INTEGER,
 				snapshot_path TEXT,
+				ax_path TEXT,
 				tier TEXT NOT NULL DEFAULT 'full'
 			)
 		`);
@@ -256,6 +280,35 @@ export class EventStore {
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_edits_session_id ON edits(session_id)",
 		);
+
+		// App state snapshots (local/sessionStorage dumps per capture) and
+		// computed accessibility issues per capture — both metadata (kept; not
+		// pruned by retention/TTL), keyed to a capture id.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS state_snapshots (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				capture_id INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				data TEXT NOT NULL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_state_snapshots_capture_id ON state_snapshots(capture_id)",
+		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS a11y_issues (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				capture_id INTEGER NOT NULL,
+				rule TEXT NOT NULL,
+				selector TEXT NOT NULL,
+				detail TEXT NOT NULL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_a11y_issues_capture_id ON a11y_issues(capture_id)",
+		);
 	}
 
 	private prepareStatements(): void {
@@ -279,6 +332,12 @@ export class EventStore {
 		);
 		this.insertEditStmt = this.db.prepare(
 			"INSERT INTO edits (ts, path, epoch_id, session_id) VALUES (?, ?, ?, ?)",
+		);
+		this.insertStateSnapshotStmt = this.db.prepare(
+			"INSERT INTO state_snapshots (ts, capture_id, kind, data) VALUES (?, ?, ?, ?)",
+		);
+		this.insertA11yIssueStmt = this.db.prepare(
+			"INSERT INTO a11y_issues (ts, capture_id, rule, selector, detail) VALUES (?, ?, ?, ?, ?)",
 		);
 	}
 
@@ -403,6 +462,35 @@ export class EventStore {
 			edit.sessionId,
 		);
 		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert an app-state snapshot row; returns its id (-1 if closed). */
+	insertStateSnapshot(snapshot: StateSnapshotRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertStateSnapshotStmt.run(
+			snapshot.ts ?? Date.now(),
+			snapshot.captureId,
+			snapshot.kind,
+			snapshot.data,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert accessibility issue rows for a capture; returns inserted ids. */
+	insertA11yIssues(issues: A11yIssueRecord[]): number[] {
+		if (this.closed) return [];
+		const ids: number[] = [];
+		for (const issue of issues) {
+			const result = this.insertA11yIssueStmt.run(
+				issue.ts ?? Date.now(),
+				issue.captureId,
+				issue.rule,
+				issue.selector,
+				issue.detail,
+			);
+			ids.push(Number(result.lastInsertRowid));
+		}
+		return ids;
 	}
 
 	/** Execute a write statement (UPDATE/DELETE); returns affected row count. */

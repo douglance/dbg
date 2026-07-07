@@ -137,6 +137,22 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 		},
 	});
 
+	cli.command("why", {
+		description:
+			"Blame the most recent (or substring-matched) error: ranked edits/epoch/commit/prompt behind it",
+		args: z.object({
+			substring: z
+				.string()
+				.optional()
+				.describe("Only consider errors whose text contains this substring"),
+		}),
+		async run({ args }) {
+			const cmd: Command = { cmd: "why", cwd: process.cwd() };
+			if (args.substring) cmd.substring = args.substring;
+			return await sendCommand(cmd);
+		},
+	});
+
 	cli.command("timeline", {
 		description:
 			"Render the recording as a filmstrip HTML page (frames annotated with saved files / HMR modules / epochs)",

@@ -75,7 +75,13 @@ import {
 	parseAnchorSpec,
 	resolveAnchor,
 } from "./recorder/anchor.js";
+import { type AxTree, computeA11yIssues } from "./recorder/a11y.js";
 import { parseHmrModules } from "./recorder/hmr.js";
+import {
+	diffNetwork,
+	type NetRequest,
+	type NetworkDiff,
+} from "./recorder/netdiff.js";
 import {
 	applyRetention,
 	DEFAULT_EVENTS_TTL_MS,
@@ -90,7 +96,17 @@ import {
 	diffSnapshots,
 	type PageSnapshot,
 } from "./recorder/snapshot.js";
+import {
+	type StateChange,
+	diffStorage,
+	type StorageSnapshot,
+} from "./recorder/storage-diff.js";
 import { isIgnoredWatchPath } from "./recorder/watch.js";
+import {
+	rankCauses,
+	type WhyCandidates,
+	type WhyVerdict,
+} from "./recorder/why.js";
 
 import { type ChildProcess, spawn } from "node:child_process";
 import * as http from "node:http";
@@ -1044,6 +1060,100 @@ async function waitForPageLoad(
 /** Capture a screenshot and insert a captures row. Returns null when the
  * screenshot is pixel-identical to the previous capture (hash dedupe) — in
  * that case pending annotations stay queued for the next distinct capture. */
+// ── Plan V: per-capture app-state + accessibility collection ──
+// Both are best-effort (never fail a capture) and stored as metadata rows
+// (kept; retention/TTL never prune them), keyed to the capture id.
+
+/** Dump local/sessionStorage via a one-shot eval → state_snapshots rows. */
+async function collectCaptureState(
+	cdp: CdpClientWrapper,
+	captureId: number,
+): Promise<void> {
+	try {
+		const res = (await cdp.send("Runtime.evaluate", {
+			expression:
+				"JSON.stringify({local:Object.assign({},window.localStorage),session:Object.assign({},window.sessionStorage)})",
+			returnByValue: true,
+		})) as { result?: { value?: string } };
+		const raw = res.result?.value;
+		if (typeof raw !== "string") return;
+		const parsed = JSON.parse(raw) as {
+			local?: Record<string, string>;
+			session?: Record<string, string>;
+		};
+		store.insertStateSnapshot({
+			captureId,
+			kind: "localStorage",
+			data: JSON.stringify(parsed.local ?? {}),
+		});
+		store.insertStateSnapshot({
+			captureId,
+			kind: "sessionStorage",
+			data: JSON.stringify(parsed.session ?? {}),
+		});
+	} catch {
+		// storage unavailable (sandboxed/opaque origin) — skip
+	}
+}
+
+/** Fetch the AX tree, compute the 5 rules → a11y_issues rows. */
+async function collectCaptureA11y(
+	cdp: CdpClientWrapper,
+	captureId: number,
+): Promise<void> {
+	try {
+		const tree = (await cdp.send("Accessibility.getFullAXTree", {})) as AxTree;
+		const issues = computeA11yIssues(tree);
+		if (issues.length > 0) {
+			store.insertA11yIssues(
+				issues.map((i) => ({
+					captureId,
+					rule: i.rule,
+					selector: i.selector,
+					detail: i.detail,
+				})),
+			);
+		}
+	} catch {
+		// Accessibility domain unavailable — skip
+	}
+}
+
+/** Load a capture's stored storage snapshot (both kinds) for state diffing. */
+function loadStorageSnapshot(captureId: number): StorageSnapshot {
+	const snap: StorageSnapshot = { localStorage: {}, sessionStorage: {} };
+	for (const row of store.query(
+		"SELECT kind, data FROM state_snapshots WHERE capture_id = ?",
+		[captureId],
+	)) {
+		let parsed: Record<string, string>;
+		try {
+			parsed = JSON.parse(String(row.data ?? "{}"));
+		} catch {
+			parsed = {};
+		}
+		if (row.kind === "localStorage") snap.localStorage = parsed;
+		else if (row.kind === "sessionStorage") snap.sessionStorage = parsed;
+	}
+	return snap;
+}
+
+/** Load a capture's computed a11y issues. */
+function loadA11yIssues(
+	captureId: number,
+): Array<{ rule: string; selector: string; detail: string }> {
+	return store
+		.query(
+			"SELECT rule, selector, detail FROM a11y_issues WHERE capture_id = ?",
+			[captureId],
+		)
+		.map((row) => ({
+			rule: String(row.rule),
+			selector: String(row.selector),
+			detail: String(row.detail),
+		}));
+}
+
 async function captureRecorderFrame(
 	session: Session,
 	recordingDir: string,
@@ -1130,6 +1240,9 @@ async function captureRecorderFrame(
 		epochId: recorder?.currentEpochId ?? null,
 		snapshotPath,
 	});
+	// Plan V: per-capture app-state + a11y metadata (best-effort).
+	await collectCaptureState(cdp, id);
+	await collectCaptureA11y(cdp, id);
 	if (recorder) {
 		recorder.lastHash = hash;
 		recorder.lastCaptureTs = ts;
@@ -1348,6 +1461,12 @@ async function handleRecordStart(
 		await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
 			source: MUTATION_OBSERVER_SOURCE,
 		});
+		// Plan V: accessibility tree access for per-capture a11y issues.
+		try {
+			await cdp.send("Accessibility.enable", {});
+		} catch {
+			// non-fatal: a11y issues simply won't be collected
+		}
 		const rawClient = cdp.getClient();
 		rawClient?.on("Runtime.bindingCalled", (params: unknown) => {
 			const p = params as { name?: string };
@@ -1770,6 +1889,65 @@ function networkDeltaSince(anchorTs: number): Array<{
 	return failures;
 }
 
+/** Reconstruct full network requests (method, url, status, duration) from
+ * recorded CDP events since `sinceTs`, keyed by requestId. Used by the
+ * networkDiff in `dbg after`. `ts` is the requestWillBeSent epoch-ms; duration
+ * is derived from the loadingFinished/loadingFailed event ts. */
+function reconstructNetworkRequests(
+	sinceTs: number,
+): Array<NetRequest & { ts: number }> {
+	const rows = store.query(
+		`SELECT ts, method, data FROM events
+		 WHERE source = 'cdp_recv'
+		   AND method IN ('Network.requestWillBeSent','Network.responseReceived','Network.loadingFinished','Network.loadingFailed')
+		   AND ts > ?
+		 ORDER BY id`,
+		[sinceTs],
+	);
+	const byId = new Map<string, NetRequest & { ts: number }>();
+	for (const row of rows) {
+		let data: {
+			event?: {
+				requestId?: string;
+				request?: { url?: string; method?: string };
+				response?: { url?: string; status?: number };
+			};
+		};
+		try {
+			data = JSON.parse(String(row.data ?? "{}"));
+		} catch {
+			continue;
+		}
+		const event = data.event;
+		const requestId = event?.requestId;
+		if (!requestId) continue;
+		const ts = Number(row.ts);
+		if (row.method === "Network.requestWillBeSent") {
+			if (event?.request?.url) {
+				byId.set(requestId, {
+					method: event.request.method ?? "GET",
+					url: event.request.url,
+					status: 0,
+					duration: 0,
+					ts,
+				});
+			}
+		} else if (row.method === "Network.responseReceived") {
+			const req = byId.get(requestId);
+			if (req && event?.response?.status != null) {
+				req.status = event.response.status;
+			}
+		} else if (
+			row.method === "Network.loadingFinished" ||
+			row.method === "Network.loadingFailed"
+		) {
+			const req = byId.get(requestId);
+			if (req) req.duration = Math.max(0, ts - req.ts);
+		}
+	}
+	return [...byId.values()];
+}
+
 /** Navigate/scroll the recorder page back to a capture's state. */
 async function restoreRecorderState(
 	cdp: CdpClientWrapper,
@@ -1887,6 +2065,24 @@ async function handleRecordAfter(
 			.map((e) => ({ type: e.type, text: e.text, ts: e.ts }));
 		const networkNew = networkDeltaSince(anchor.ts);
 
+		// ── Plan V: network diff, state (storage) diff, new a11y issues ──
+		const netReqs = reconstructNetworkRequests(anchor.ts - 60000);
+		const networkDiff = diffNetwork(
+			netReqs.filter((r) => r.ts <= anchor.ts),
+			netReqs.filter((r) => r.ts > anchor.ts),
+		);
+		const stateChanges = diffStorage(
+			loadStorageSnapshot(anchor.id),
+			loadStorageSnapshot(frame.id),
+		);
+		const anchorA11y = loadA11yIssues(anchor.id);
+		const a11yBefore = new Set(
+			anchorA11y.map((i) => `${i.rule}|${i.selector}`),
+		);
+		const a11yNew = loadA11yIssues(frame.id).filter(
+			(i) => !a11yBefore.has(`${i.rule}|${i.selector}`),
+		);
+
 		// ── Phase 4: component blame + structural style diff ──
 		const baselineSnapshot = loadPageSnapshot(anchor.snapshotPath);
 		const afterSnapshot = loadPageSnapshot(frame.snapshotPath);
@@ -1953,6 +2149,9 @@ async function handleRecordAfter(
 						status: f.status,
 						text: f.error,
 					})),
+					networkDiff,
+					stateChanges,
+					a11yIssues: a11yNew,
 				},
 			],
 			meta: {
@@ -2014,6 +2213,9 @@ async function handleRecordAfter(
 			consoleDelta: { new: consoleNew },
 			exceptionDelta: { new: exceptionsNew },
 			networkDelta: { failed: networkNew },
+			networkDiff,
+			stateChanges,
+			a11yNew,
 			regions,
 			styleChanges,
 			reportPath,
@@ -2021,6 +2223,102 @@ async function handleRecordAfter(
 	} catch (e) {
 		return { ok: false, error: (e as Error).message };
 	}
+}
+
+// ── Plan V: dbg why — blame the most recent (or matched) error ──
+async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
+	const session =
+		registry.sessions.get(RECORDER_SESSION) ??
+		registry.sessions.values().next().value ??
+		null;
+	if (!session) {
+		return {
+			ok: false,
+			error: "no active session; dbg why needs a live recording/session",
+		};
+	}
+
+	// Error-like entries (console errors/asserts + exceptions) with stack hints.
+	const errs: Array<{ ts: number; text: string; stack: string }> = [];
+	for (const e of session.state.console) {
+		if (e.type !== "error" && e.type !== "assert") continue;
+		errs.push({ ts: e.ts, text: e.text, stack: e.stack ?? "" });
+	}
+	for (const ex of session.state.exceptions) {
+		errs.push({
+			ts: ex.ts,
+			text: ex.text,
+			stack: ex.file ? `${ex.file}:${ex.line}` : "",
+		});
+	}
+	if (errs.length === 0) {
+		return {
+			ok: false,
+			error: "no errors or exceptions recorded in this session",
+		};
+	}
+	errs.sort((a, b) => a.ts - b.ts);
+
+	const matched = substring
+		? errs.filter((e) => e.text.toLowerCase().includes(substring.toLowerCase()))
+		: errs;
+	if (matched.length === 0) {
+		return { ok: false, error: `no error matching "${substring}"` };
+	}
+	const target = matched[matched.length - 1];
+	// first-seen ts for this exact text (the error may repeat).
+	const targetTs = (errs.find((e) => e.text === target.text) ?? target).ts;
+
+	const windowMs = 5 * 60 * 1000;
+	const edits = store
+		.query(
+			"SELECT ts, path, epoch_id FROM edits WHERE session_id = ? AND ts >= ? AND ts <= ? ORDER BY ts",
+			[session.name, targetTs - windowMs, targetTs],
+		)
+		.map((r) => ({
+			ts: Number(r.ts),
+			path: String(r.path),
+			epochId: r.epoch_id == null ? null : Number(r.epoch_id),
+		}));
+	const epochs = store
+		.query(
+			"SELECT id, ts, name FROM epochs WHERE session_id = ? AND ts <= ? ORDER BY ts",
+			[session.name, targetTs],
+		)
+		.map((r) => ({
+			id: Number(r.id),
+			ts: Number(r.ts),
+			name: r.name == null ? null : String(r.name),
+		}));
+
+	// Commits + prompts via the dev tables, scoped to the client's cwd.
+	setScopeCwd(cwd ?? null);
+	let commits: WhyCandidates["commits"] = [];
+	let prompts: WhyCandidates["prompts"] = [];
+	try {
+		const cRes = await commitsTable.fetch(null, session.executor);
+		commits = cRes.rows.map((row) => ({
+			ts: Number(row[2]),
+			shortHash: String(row[1] ?? ""),
+			summary: String(row[4] ?? ""),
+		}));
+		const pRes = await agentPromptsTable.fetch(null, session.executor);
+		prompts = pRes.rows.map((row) => ({
+			ts: Number(row[0]),
+			display: String(row[1] ?? ""),
+		}));
+	} catch {
+		// dev tables are optional context
+	} finally {
+		setScopeCwd(null);
+	}
+
+	const verdict: WhyVerdict = rankCauses(
+		{ ts: targetTs, text: target.text, stack: target.stack },
+		{ edits, epochs, commits, prompts },
+		windowMs,
+	);
+	return { ok: true, why: verdict, messages: [verdict.answer] };
 }
 
 const TIMELINE_DEFAULT_LIMIT = 100;
@@ -3352,6 +3650,8 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleRecordReplay(cmd.capture);
 		case "record.shoot":
 			return handleRecordShoot(cmd);
+		case "why":
+			return handleWhy(cmd.substring, cmd.cwd);
 	}
 
 	// Session-scoped commands share an optional `session` field.

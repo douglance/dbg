@@ -47,6 +47,48 @@ export interface PairStats {
 	dimensionsChanged: boolean;
 }
 
+export interface NetworkDiffReport {
+	added: Array<{
+		method: string;
+		pattern: string;
+		url: string;
+		status: number;
+	}>;
+	removed: Array<{
+		method: string;
+		pattern: string;
+		url: string;
+		status: number;
+	}>;
+	statusChanged: Array<{
+		method: string;
+		pattern: string;
+		url: string;
+		before: number;
+		after: number;
+	}>;
+	durationDelta: Array<{
+		method: string;
+		pattern: string;
+		url: string;
+		deltaMs: number;
+	}>;
+}
+
+export interface StateChangeReport {
+	kind: string;
+	key: string;
+	change: string;
+	before: unknown;
+	after: unknown;
+}
+
+export interface A11yIssueReport {
+	rule: string;
+	selector: string;
+	detail: string;
+}
+
 export interface ReportPair {
 	name: string;
 	beforePng: Buffer;
@@ -57,6 +99,9 @@ export interface ReportPair {
 	styleChanges?: StyleChange[];
 	newErrors?: NewError[];
 	newNetworkFailures?: NetworkFailure[];
+	networkDiff?: NetworkDiffReport;
+	stateChanges?: StateChangeReport[];
+	a11yIssues?: A11yIssueReport[];
 }
 
 export interface ReportMeta {
@@ -253,6 +298,66 @@ function renderNetworkPanel(failures: NetworkFailure[]): string {
 	return `<section class="panel"><h3>New network failures <span class="badge red">${failures.length}</span></h3><ul>${items}</ul></section>`;
 }
 
+function renderNetworkDiffPanel(diff?: NetworkDiffReport): string {
+	if (!diff) return "";
+	const items: string[] = [];
+	for (const a of diff.added) {
+		items.push(
+			`<li><span class="badge amber">added</span> <code>${esc(a.method)}</code> ${esc(a.pattern)} <span class="badge dim">${esc(String(a.status))}</span></li>`,
+		);
+	}
+	for (const r of diff.removed) {
+		items.push(
+			`<li><span class="badge dim">removed</span> <code>${esc(r.method)}</code> ${esc(r.pattern)}</li>`,
+		);
+	}
+	for (const s of diff.statusChanged) {
+		items.push(
+			`<li><span class="badge red">status</span> <code>${esc(s.method)}</code> ${esc(s.pattern)} <span class="was">${esc(String(s.before))}</span><span class="arrow">→</span><span class="now">${esc(String(s.after))}</span></li>`,
+		);
+	}
+	for (const d of diff.durationDelta) {
+		const sign = d.deltaMs > 0 ? "+" : "";
+		items.push(
+			`<li><span class="badge amber">timing</span> <code>${esc(d.method)}</code> ${esc(d.pattern)} <span class="now">${sign}${esc(String(d.deltaMs))}ms</span></li>`,
+		);
+	}
+	if (items.length === 0) return "";
+	return `<section class="panel"><h3>Network diff <span class="badge amber">${items.length}</span></h3><ul>${items.join("")}</ul></section>`;
+}
+
+function renderStateChangesPanel(changes: StateChangeReport[]): string {
+	if (changes.length === 0) return "";
+	const preview = (value: unknown): string => {
+		if (value === undefined) return "∅";
+		const text = typeof value === "string" ? value : JSON.stringify(value);
+		return esc(text.length > 60 ? `${text.slice(0, 59)}…` : text);
+	};
+	const badge: Record<string, string> = {
+		added: "amber",
+		removed: "dim",
+		changed: "red",
+	};
+	const items = changes
+		.map(
+			(c) =>
+				`<li><span class="badge ${badge[c.change] ?? "dim"}">${esc(c.change)}</span> <span class="sel">${esc(c.kind)}</span> <code>${esc(c.key)}</code>: <span class="was">${preview(c.before)}</span><span class="arrow">→</span><span class="now">${preview(c.after)}</span></li>`,
+		)
+		.join("");
+	return `<section class="panel"><h3>State changes <span class="badge amber">${changes.length}</span></h3><ul>${items}</ul></section>`;
+}
+
+function renderA11yPanel(issues: A11yIssueReport[]): string {
+	if (issues.length === 0) return "";
+	const items = issues
+		.map(
+			(i) =>
+				`<li><span class="badge red">${esc(i.rule)}</span> <span class="sel">${esc(i.selector)}</span> — ${esc(i.detail)}</li>`,
+		)
+		.join("");
+	return `<section class="panel"><h3>New a11y issues <span class="badge red">${issues.length}</span></h3><ul>${items}</ul></section>`;
+}
+
 function renderPair(pair: ReportPair, index: number): string {
 	const before = pngUri(pair.beforePng);
 	const after = pngUri(pair.afterPng);
@@ -309,6 +414,9 @@ function renderPair(pair: ReportPair, index: number): string {
 		${renderStyleChangesPanel(pair.styleChanges ?? [])}
 		${renderErrorsPanel(pair.newErrors ?? [])}
 		${renderNetworkPanel(pair.newNetworkFailures ?? [])}
+		${renderNetworkDiffPanel(pair.networkDiff)}
+		${renderStateChangesPanel(pair.stateChanges ?? [])}
+		${renderA11yPanel(pair.a11yIssues ?? [])}
 	</div>
 </section>`;
 }

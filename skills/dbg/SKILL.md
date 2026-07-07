@@ -177,6 +177,8 @@ dbg mark before-fix                  # stamp a named epoch (auto-epochs happen o
 dbg after --json                     # capture now, diff vs anchor: pixels + component blame
                                      #   + style deltas + new console/network errors + report.html
 dbg after --at mark:before-fix       # explicit anchors: capture:<id> | mark:<name> | time:<ts|10m> | file:<path>
+dbg why                              # blame the most recent error → ranked edit/epoch/commit/prompt
+dbg why "coupon"                     # blame the most recent error whose text contains "coupon"
 dbg timeline                         # filmstrip HTML of every capture with annotations
 dbg replay <captureId>               # restore a capture's URL/scroll in the recorder page
 dbg record --status                  # captureCount, epochCount, lastCaptureTs
@@ -189,6 +191,23 @@ dbg record --stop                    # end recording, kill managed Chrome
 (computed-style deltas like `padding-top: 8px → 40px`), `consoleDelta` /
 `exceptionDelta` / `networkDelta`, and `reportPath` (self-contained HTML with
 side-by-side / wipe / onion-skin / diff-overlay views). Add `--open` for humans.
+
+**Verdict sections (Plan V)** — `dbg after` also returns:
+- `networkDiff` — requests grouped by method + normalized URL pattern (numeric
+  ids / uuids collapsed to `:id`), classified `added` / `removed` /
+  `statusChanged` / `durationDelta` (anchor window vs after window).
+- `stateChanges` — added/removed/changed local & sessionStorage keys
+  (JSON-parsed values), from the per-capture `state_snapshots`.
+- `a11yNew` — accessibility issues present in the after capture but not the
+  anchor (five rules: missing alt, control/button without name, control without
+  label, duplicate landmark, missing document title).
+
+`dbg why [substring]` walks the substrate back from the target error to ranked
+causes and returns a `why` verdict + one-line `answer`, e.g. *"'Cannot read x of
+undefined' first seen …, 2.1s after you saved src/Cart.tsx (epoch 4:
+'before-fix', prompt: 'add coupon field')"*. Ranking = edit recency +
+file-in-stack-trace bonus; plus the enclosing epoch, nearest commit, and active
+agent prompt. Needs a live recording/session (reads that session's errors).
 
 ### Deliberate Captures (shoot)
 
@@ -340,6 +359,8 @@ agent history all join on `ts` directly.
 | `diffs` | `dbg after` pixel-diff results | recorder store |
 | `regions` | Blamed diff clusters (`diff_id`) | recorder store |
 | `edits` | **First-class file-edit stream** — one row per fs-watch event (`ts`, `path`, `epoch_id`, `session_id`), tagged with the current epoch | recorder store |
+| `state_snapshots` | Per-capture local/sessionStorage dump (`capture_id`, `kind`, `data` JSON) | recorder store |
+| `a11y_issues` | Per-capture accessibility issues (`capture_id`, `rule`, `selector`, `detail`) | recorder store |
 | `commits` | `git log` (hash, short_hash, ts, author, summary, files); default repo = cwd, override `WHERE repo = '/abs'` (500 most recent) | git |
 | `agent_prompts` | Claude Code prompts (`ts`, `display`, `project`); default-scoped to cwd, `WHERE project = '<slug>'` widens | `~/.claude/history.jsonl` |
 | `agent_sessions` | Per-session transcript summaries (`ts_first`, `ts_last`, `title`, `message_count`) | `~/.claude/projects/<slug>` |

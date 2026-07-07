@@ -286,6 +286,10 @@ export type Command =
 	| { cmd: "record.timeline"; open?: boolean; limit?: number }
 	// Restore a capture's URL/scroll in the recorder page.
 	| { cmd: "record.replay"; capture: number }
+	// Blame the most recent (or substring-matched) error: walk the timeline
+	// back to ranked causes (edits/epoch/commit/prompt). `cwd` scopes the dev
+	// tables to the user's project (see `q`).
+	| { cmd: "why"; substring?: string; cwd?: string }
 	// One-off deliberate capture: URL, or a component file rendered in an
 	// esbuild harness (#dbg-root). Launches a throwaway Chrome; `states` are
 	// forced via CSS.forcePseudoState and each produces its own PNG.
@@ -351,6 +355,67 @@ export interface AfterStyleChange {
 	after: string;
 }
 
+export interface AfterNetEntry {
+	method: string;
+	pattern: string;
+	url: string;
+	status: number;
+	durationMs: number;
+}
+
+export interface AfterNetStatusChange {
+	method: string;
+	pattern: string;
+	url: string;
+	before: number;
+	after: number;
+}
+
+export interface AfterNetDurationDelta {
+	method: string;
+	pattern: string;
+	url: string;
+	beforeMs: number;
+	afterMs: number;
+	deltaMs: number;
+}
+
+export interface AfterNetworkDiff {
+	added: AfterNetEntry[];
+	removed: AfterNetEntry[];
+	statusChanged: AfterNetStatusChange[];
+	durationDelta: AfterNetDurationDelta[];
+}
+
+export interface AfterStateChange {
+	kind: string;
+	key: string;
+	change: string;
+	before: unknown;
+	after: unknown;
+}
+
+export interface AfterA11yIssue {
+	rule: string;
+	selector: string;
+	detail: string;
+}
+
+export interface WhyVerdict {
+	error: { text: string; ts: number };
+	edits: Array<{
+		path: string;
+		ts: number;
+		score: number;
+		inStack: boolean;
+		msBefore: number;
+	}>;
+	epoch: { id: number; name: string | null; ts: number } | null;
+	commit: { shortHash: string; summary: string; ts: number } | null;
+	prompt: { display: string; ts: number } | null;
+	answer: string;
+}
+
 export interface AfterPair {
 	name: string;
 	baseline: { captureId: number; ts: number };
@@ -407,6 +472,11 @@ export interface OkResponse {
 	consoleDelta?: { new: AfterDeltaEntry[] };
 	exceptionDelta?: { new: AfterDeltaEntry[] };
 	networkDelta?: { failed: AfterNetworkFailure[] };
+	// ── Plan V verdicts ──
+	networkDiff?: AfterNetworkDiff;
+	stateChanges?: AfterStateChange[];
+	a11yNew?: AfterA11yIssue[];
+	why?: WhyVerdict;
 	regions?: AfterRegion[];
 	styleChanges?: AfterStyleChange[];
 	reportPath?: string;

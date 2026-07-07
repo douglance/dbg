@@ -216,6 +216,7 @@ dbg record --status | --stop
 | `dbg after [name]` | Capture + diff vs anchor: `--at capture:<id>\|mark:<name>\|time:<ts\|10m>\|file:<path>`, `--open` |
 | `dbg timeline` | Self-contained filmstrip HTML of the most recent frames (`--open`, `--limit <n>`, default 100) |
 | `dbg replay <id>` | Restore a capture's URL/scroll in the recorder page |
+| `dbg why [substring]` | Blame the most recent (or matched) error → ranked edit/epoch/commit/prompt + one-line answer |
 | `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full-page`, `--out <dir>`, `--name`) |
 
 `dbg after` returns one JSON verdict: pixel diff (`pair.diffPercent`), changed
@@ -224,6 +225,19 @@ that component's file was just saved/HMR'd; tag.class labels on non-React
 pages), computed-style deltas (`styleChanges`), and new console/exception/
 network failures since the anchor — plus a self-contained `report.html`
 (side-by-side, wipe slider, onion skin, diff overlay with labeled regions).
+
+**Verdicts (Plan V).** `dbg after` also returns `networkDiff` (requests grouped
+by method + normalized URL pattern → added/removed/status-changed/duration-delta),
+`stateChanges` (added/removed/changed local & sessionStorage keys, from the
+per-capture `state_snapshots`), and `a11yNew` (accessibility issues new since the
+anchor: missing alt, control/button without name, control without label,
+duplicate landmark, missing title). `dbg why [substring]` walks the unified
+timeline back from an error to ranked causes — the recent edits (weighted by
+recency + whether their file is in the stack trace), the enclosing epoch, the
+nearest commit, and the active agent prompt — and phrases a one-line `answer`
+like *"…2.1s after you saved src/Cart.tsx (epoch 4: 'before-fix', prompt: 'add
+coupon field')"*. Both stay within the sub-second `after` budget (measured
+221ms; no budget increase needed).
 
 `dbg shoot Component.tsx` renders the component in an esbuild harness using
 *your* project's react-dom and screenshots `#dbg-root`; `--states` forces
@@ -316,6 +330,8 @@ edits, git commits, screenshots, and agent history join directly:
 | Table | Description | Key Columns |
 |---|---|---|
 | `edits` | First-class file-edit stream (one row per fs-watch event during recording) | `id`, `ts`, `path`, `epoch_id`, `session_id` |
+| `state_snapshots` | Per-capture local/sessionStorage dump | `capture_id`, `kind`, `data` |
+| `a11y_issues` | Per-capture accessibility issues | `capture_id`, `rule`, `selector`, `detail` |
 | `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |
 | `agent_prompts` | Claude Code prompts, cwd-scoped (`WHERE project = '<slug>'` widens) | `ts`, `display`, `project` |
 | `agent_sessions` | Per-session transcript summaries (cached by mtime/size) | `session_id`, `ts_first`, `ts_last`, `title`, `message_count` |
