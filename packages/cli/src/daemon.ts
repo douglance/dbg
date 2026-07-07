@@ -2016,7 +2016,7 @@ async function buildComponentHarness(
 		import { createRoot } from "react-dom/client";
 		import * as Mod from ${JSON.stringify(componentPath)};
 		const Component = Mod.default ?? Object.values(Mod)[0];
-		createRoot(document.getElementById("ba-root")).render(
+		createRoot(document.getElementById("dbg-root")).render(
 			React.createElement(Component, ${JSON.stringify(props)}),
 		);
 	`;
@@ -2035,7 +2035,7 @@ async function buildComponentHarness(
 	});
 	const bundle = result.outputFiles?.[0]?.text ?? "";
 	const html =
-		'<!doctype html><html><head><meta charset="utf-8"><title>dbg shoot harness</title></head><body style="margin:0;padding:16px;background:#fff"><div id="ba-root"></div><script src="/bundle.js"></script></body></html>';
+		'<!doctype html><html><head><meta charset="utf-8"><title>dbg shoot harness</title></head><body style="margin:0;padding:16px;background:#fff"><div id="dbg-root"></div><script src="/bundle.js"></script></body></html>';
 
 	const server = http.createServer((req, res) => {
 		if (req.url?.startsWith("/bundle.js")) {
@@ -2086,6 +2086,7 @@ async function shootCapture(
 	stateName: string,
 	selector: string | null,
 	fullPage: boolean,
+	url: string,
 ): Promise<{ state: string; path: string }> {
 	let clip: Record<string, number> | null = null;
 	if (selector && !fullPage) {
@@ -2116,9 +2117,23 @@ async function shootCapture(
 		...(fullPage ? { captureBeyondViewport: true } : {}),
 		...(clip ? { clip } : {}),
 	})) as { data: string };
+	const buffer = Buffer.from(shot.data, "base64");
 	fs.mkdirSync(outDir, { recursive: true });
-	const pngPath = path.join(outDir, `${baseName}-${stateName}.png`);
-	fs.writeFileSync(pngPath, Buffer.from(shot.data, "base64"));
+	// Default state is the bare name; pseudo states are @-suffixed.
+	const fileName =
+		stateName === "default"
+			? `${baseName}.png`
+			: `${baseName}@${stateName}.png`;
+	const pngPath = path.join(outDir, fileName);
+	fs.writeFileSync(pngPath, buffer);
+	// Shots are standalone PNGs, but also land as captures rows (session
+	// "shoot") so they stay queryable next to recorder captures.
+	store.insertCapture({
+		sessionId: "shoot",
+		url,
+		hash: createHash("sha256").update(buffer).digest("hex").slice(0, 16),
+		pngPath,
+	});
 	return { state: stateName, path: pngPath };
 }
 
@@ -2130,6 +2145,7 @@ async function handleRecordShoot(cmd: {
 	states?: string[];
 	props?: string;
 	name?: string;
+	out?: string;
 }): Promise<Response> {
 	const states = cmd.states ?? [];
 	for (const state of states) {
@@ -2144,7 +2160,9 @@ async function handleRecordShoot(cmd: {
 		return { ok: false, error: "another shoot is in progress; retry shortly" };
 	}
 
-	const isUrl = /^https?:\/\//i.test(cmd.target);
+	// http(s) and file:// targets are URL shoots; only non-URL filesystem
+	// paths go through the component harness.
+	const isUrl = /^(https?|file):\/\//i.test(cmd.target);
 	let harness: ComponentHarness | null = null;
 	let url = cmd.target;
 	let selector = cmd.selector ?? null;
@@ -2166,7 +2184,7 @@ async function handleRecordShoot(cmd: {
 			};
 		}
 		url = harness.url;
-		selector = selector ?? "#ba-root";
+		selector = selector ?? "#dbg-root";
 	}
 
 	const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-shoot-"));
@@ -2203,6 +2221,10 @@ async function handleRecordShoot(cmd: {
 			deviceScaleFactor: 1,
 			mobile: false,
 		});
+		// Deterministic pixels: disable animations for the deliberate capture.
+		await cdp.send("Emulation.setEmulatedMedia", {
+			features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+		});
 
 		const nav = (await cdp.send("Page.navigate", { url })) as {
 			errorText?: string;
@@ -2212,7 +2234,9 @@ async function handleRecordShoot(cmd: {
 		// Let a harness (or late JS) paint before the deliberate capture.
 		await new Promise((r) => setTimeout(r, 400));
 
-		const outDir = path.join(process.cwd(), ".dbg", "recordings", "shots");
+		const outDir = cmd.out
+			? path.resolve(process.cwd(), cmd.out)
+			: path.join(process.cwd(), ".dbg", "shots");
 		const shots: Array<{ state: string; path: string }> = [];
 		shots.push(
 			await shootCapture(
@@ -2222,6 +2246,7 @@ async function handleRecordShoot(cmd: {
 				"default",
 				selector,
 				cmd.fullPage ?? false,
+				cmd.target,
 			),
 		);
 		for (const pseudo of states) {
@@ -2235,6 +2260,7 @@ async function handleRecordShoot(cmd: {
 					pseudo,
 					selector,
 					cmd.fullPage ?? false,
+					cmd.target,
 				),
 			);
 			await forceShootPseudoState(cdp, selector ?? "body", []);

@@ -171,7 +171,7 @@ dbg q "SELECT url, used_pct FROM coverage ORDER BY used_pct ASC"
 
 ```sh
 dbg record http://localhost:3000     # daemon launches headless Chrome, keeps recording
-dbg record http://localhost:3000 --viewport 1280x720   # WxH or preset (desktop|laptop|tablet|mobile)
+dbg record http://localhost:3000 --viewport 1280x720   # WxH or preset (desktop|tablet|mobile)
 dbg mark before-fix                  # stamp a named epoch (auto-epochs happen on edit bursts)
 # ... edit code; saved files + vite HMR modules annotate captures automatically ...
 dbg after --json                     # capture now, diff vs anchor: pixels + component blame
@@ -195,12 +195,17 @@ side-by-side / wipe / onion-skin / diff-overlay views). Add `--open` for humans.
 ```sh
 dbg shoot http://localhost:3000 --selector "#nav" --states hover,focus
 dbg shoot src/Button.tsx --props '{"variant":"primary"}'   # esbuild harness renders
-                                     # the component with YOUR react-dom at #ba-root
-dbg shoot http://localhost:3000 --viewport mobile --full   # preset + full-page
+                                     # the component with YOUR react-dom at #dbg-root
+dbg shoot http://localhost:3000 --viewport mobile --full-page
+dbg shoot http://localhost:3000 --out screenshots/ --name nav-check
 ```
 
-Each state produces its own PNG under `.dbg/recordings/shots/`. For Storybook,
-shoot the story URL directly (e.g. `dbg shoot 'http://localhost:6006/iframe.html?id=button--primary'`).
+Viewport presets: `desktop` (1280x800), `tablet` (768x1024), `mobile` (390x844),
+or any `WxH`. Each state produces its own PNG under `.dbg/shots/` (base name for
+the default state, `name@hover.png` etc. for forced states); shots also land as
+`captures` rows under session `shoot`. prefers-reduced-motion is emulated so
+animations don't pollute pixels. For Storybook, shoot the story URL directly
+(e.g. `dbg shoot 'http://localhost:6006/iframe.html?id=button--primary'`).
 
 ### Apple Device / Simulator (iOS, tvOS, watchOS, visionOS)
 
@@ -417,12 +422,44 @@ dbg mark attempt-1                   # 2. stamp where you are
 dbg after --json                     # 4. verdict: pixel diff % + blamed components
                                      #    + style deltas + new errors, in one JSON
 # 5. iterate; when done, show report.html to the human (dbg after --open)
-dbg q "SELECT ts, changed_files, epoch_id FROM captures"   # the visual git log
 dbg record --stop
 ```
 
 "Before" always exists retroactively: the anchor defaults to the last capture
 at the newest epoch, so you can edit first and ask questions later.
+
+Performance: sub-second after-verdicts are the design target, so poll freely.
+CI-enforced budgets (test/perf.test.ts): record cold start < 4s, mark < 500ms,
+after < 1.5s, timeline < 1s, shoot < 5s, mutation → capture row < 1.5s.
+
+The `dbg after --json` verdict shape:
+
+```json
+{
+  "ok": true,
+  "pair": { "name": "capture 1 → capture 3", "baseline": {"captureId": 1, "ts": 0},
+            "after": {"captureId": 3, "ts": 0}, "diffPercent": 27.8,
+            "diffPixels": 133588, "dimensionsChanged": false, "clusters": 2 },
+  "regions": [ { "box": {"x": 8, "y": 61, "w": 480, "h": 280},
+                 "label": "ColorCard", "component": "ColorCard",
+                 "file": null, "causal": true } ],
+  "styleChanges": [ { "selector": "div.color-card", "prop": "padding-top",
+                      "before": "8px", "after": "40px" } ],
+  "consoleDelta": { "new": [ {"type": "error", "text": "boom", "ts": 0} ] },
+  "exceptionDelta": { "new": [] },
+  "networkDelta": { "failed": [] },
+  "reportPath": ".dbg/recordings/report.html"
+}
+```
+
+Recorder SQL tables (join them with `console`, `network`, etc.):
+
+```sh
+dbg q "SELECT ts, changed_files, hmr_modules, epoch_id FROM captures"  # visual git log
+dbg q "SELECT id, ts, name, auto FROM epochs"                          # marks + edit bursts
+dbg q "SELECT name, diff_percent, report_path FROM diffs"              # every after verdict
+dbg q "SELECT diff_id, component, causal FROM regions"                 # who changed the pixels
+```
 
 ## Tips
 

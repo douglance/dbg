@@ -211,12 +211,12 @@ dbg record --status | --stop
 
 | Command | Description |
 |---|---|
-| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|laptop\|tablet\|mobile`, `--idle <ms>`) |
+| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|tablet\|mobile`, `--idle <ms>`) |
 | `dbg mark [name]` | Stamp a named epoch in the timeline |
 | `dbg after [name]` | Capture + diff vs anchor: `--at capture:<id>\|mark:<name>\|time:<ts\|10m>\|file:<path>`, `--open` |
 | `dbg timeline` | Self-contained filmstrip HTML (`--open`) |
 | `dbg replay <id>` | Restore a capture's URL/scroll in the recorder page |
-| `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full`, `--name`) |
+| `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full-page`, `--out <dir>`, `--name`) |
 
 `dbg after` returns one JSON verdict: pixel diff (`pair.diffPercent`), changed
 regions blamed to **React component names** (`regions`, with `causal: true` when
@@ -226,12 +226,20 @@ network failures since the anchor — plus a self-contained `report.html`
 (side-by-side, wipe slider, onion skin, diff overlay with labeled regions).
 
 `dbg shoot Component.tsx` renders the component in an esbuild harness using
-*your* project's react-dom and screenshots `#ba-root`; `--states` forces
-`:hover`/`:focus`/etc. via CSS.forcePseudoState, one PNG per state. For
-Storybook, shoot the story iframe URL directly.
+*your* project's react-dom and screenshots `#dbg-root`; `--states` forces
+`:hover`/`:focus`/etc. via CSS.forcePseudoState — one PNG per state under
+`.dbg/shots/` (`name.png`, `name@hover.png`, ...), with reduced motion
+emulated for deterministic pixels. For Storybook, shoot the story iframe URL
+directly.
 
 Recorder data is queryable like everything else: `captures`, `epochs`, `diffs`,
 and `regions` tables (e.g. `dbg q "SELECT ts, changed_files, epoch_id FROM captures"`).
+
+**Performance.** Sub-second after-verdicts are the design target — agents can
+poll the loop cheaply. Budgets are enforced in CI (`test/perf.test.ts`):
+`record` cold start < 4s (includes Chrome launch), `mark` < 500ms,
+`after` < 1.5s, `timeline` < 1s, `shoot` < 5s (throwaway Chrome), DOM
+mutation → capture row < 1.5s. Typical measured times are ~3x under budget.
 
 ### Query Engine
 

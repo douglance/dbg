@@ -276,7 +276,7 @@ export type Command =
 	// Restore a capture's URL/scroll in the recorder page.
 	| { cmd: "record.replay"; capture: number }
 	// One-off deliberate capture: URL, or a component file rendered in an
-	// esbuild harness (#ba-root). Launches a throwaway Chrome; `states` are
+	// esbuild harness (#dbg-root). Launches a throwaway Chrome; `states` are
 	// forced via CSS.forcePseudoState and each produces its own PNG.
 	| {
 			cmd: "record.shoot";

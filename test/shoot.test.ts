@@ -1,9 +1,10 @@
-// Phase 5 e2e: dbg shoot — deliberate one-off captures.
-// (a) URL + --selector + --states hover: the :hover restyle produces a
-//     nonzero pixel diff between the default and hover shots.
-// (b) Component harness: Button.tsx shot twice with different --props
-//     (tone green vs red) produces a nonzero diff.
-// (c) Viewport presets: --viewport mobile yields a 390px-wide PNG.
+// Phase 5 e2e: dbg shoot on URLs — deliberate one-off captures.
+// - viewport preset produces a PNG with the preset's exact dimensions
+// - --selector clips to the element (smaller than the viewport)
+// - --states hover produces an @hover PNG that differs from the base
+//   (pixel-compare via @dbg/diff)
+// - shots also land as captures rows under session 'shoot'
+// - no orphan Chrome
 //
 // Requires a real Chrome-compatible browser; skipped when none is installed.
 
@@ -11,8 +12,8 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { diffPngs } from "../packages/diff/src/index.js";
 import { resolveChromeExecutable } from "../packages/launcher/src/index.js";
 
@@ -97,7 +98,7 @@ function shoot(...args: string[]): ShootResponse {
 	return JSON.parse(result.stdout) as ShootResponse;
 }
 
-describe.runIf(hasChrome)("dbg shoot (e2e)", () => {
+describe.runIf(hasChrome)("dbg shoot — URLs (e2e)", () => {
 	let server: ChildProcess;
 	let fixtureUrl: string;
 
@@ -141,7 +142,48 @@ describe.runIf(hasChrome)("dbg shoot (e2e)", () => {
 	});
 
 	it(
-		"captures a hover state that differs from the default",
+		"viewport preset produces a PNG with the preset's dimensions",
+		{ timeout: 120000 },
+		() => {
+			const response = shoot(
+				fixtureUrl,
+				"--viewport",
+				"mobile",
+				"--name",
+				"mobileshot",
+			);
+			const shotPath = (response.shots ?? [])[0].path;
+			// default output dir + default state = bare name
+			expect(
+				shotPath.endsWith(path.join(".dbg", "shots", "mobileshot.png")),
+			).toBe(true);
+			const png = PNG.sync.read(fs.readFileSync(shotPath));
+			expect(png.width).toBe(390);
+			expect(png.height).toBe(844);
+		},
+	);
+
+	it(
+		"--selector clips to the element (smaller than the viewport)",
+		{ timeout: 120000 },
+		() => {
+			const response = shoot(
+				fixtureUrl,
+				"--selector",
+				"button",
+				"--name",
+				"clipped",
+			);
+			const png = PNG.sync.read(
+				fs.readFileSync((response.shots ?? [])[0].path),
+			);
+			expect(png.width).toBeLessThan(1280);
+			expect(png.height).toBeLessThan(800);
+		},
+	);
+
+	it(
+		"--states hover: the @hover PNG differs from the base",
 		{ timeout: 120000 },
 		() => {
 			const response = shoot(
@@ -153,66 +195,41 @@ describe.runIf(hasChrome)("dbg shoot (e2e)", () => {
 				"--name",
 				"hoverbtn",
 			);
-			expect(response.ok).toBe(true);
 			expect(response.shots?.map((s) => s.state)).toEqual(["default", "hover"]);
-			const [defaultShot, hoverShot] = response.shots ?? [];
-			const defaultPng = fs.readFileSync(defaultShot.path);
-			const hoverPng = fs.readFileSync(hoverShot.path);
-			const diff = diffPngs(defaultPng, hoverPng);
+			const [base, hover] = response.shots ?? [];
+			expect(hover.path.endsWith("hoverbtn@hover.png")).toBe(true);
+			const diff = diffPngs(
+				fs.readFileSync(base.path),
+				fs.readFileSync(hover.path),
+			);
 			expect(diff.diffPixels).toBeGreaterThan(0);
 		},
 	);
 
 	it(
-		"renders Button.tsx in the harness; two prop sets diff nonzero",
+		"file:// targets are URL shoots, not harness lookups",
 		{ timeout: 120000 },
 		() => {
-			const buttonPath = path.resolve(
-				__dirname,
-				"fixtures/react-app/Button.tsx",
-			);
-			const green = shoot(
-				buttonPath,
-				"--props",
-				'{"tone":"green"}',
-				"--name",
-				"btn-green",
-			);
-			const red = shoot(
-				buttonPath,
-				"--props",
-				'{"tone":"red","label":"changed label"}',
-				"--name",
-				"btn-red",
-			);
-			expect(green.ok && red.ok).toBe(true);
-			const greenPng = fs.readFileSync((green.shots ?? [])[0].path);
-			const redPng = fs.readFileSync((red.shots ?? [])[0].path);
-			const diff = diffPngs(greenPng, redPng);
-			expect(diff.diffPixels).toBeGreaterThan(0);
-			// clipped to #ba-root, not the whole viewport
-			expect(PNG.sync.read(greenPng).width).toBeLessThan(1280);
+			const fileUrl = `file://${path.join(fs.realpathSync(serveDir), "index.html")}`;
+			const response = shoot(fileUrl, "--name", "filefixture");
+			expect(response.ok).toBe(true);
+			const png = fs.readFileSync((response.shots ?? [])[0].path);
+			expect(Array.from(png.subarray(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
 		},
 	);
 
-	it(
-		"applies viewport presets (mobile = 390px wide)",
-		{ timeout: 120000 },
-		() => {
-			const response = shoot(
-				fixtureUrl,
-				"--viewport",
-				"mobile",
-				"--name",
-				"mobileshot",
-			);
-			const png = PNG.sync.read(
-				fs.readFileSync((response.shots ?? [])[0].path),
-			);
-			expect(png.width).toBe(390);
-			expect(png.height).toBe(844);
-		},
-	);
+	it("shots land as captures rows under session 'shoot'", () => {
+		const rows = dbg(
+			"q",
+			"SELECT COUNT(*) FROM captures WHERE session_id = 'shoot'",
+			"--json",
+		);
+		expect(rows.exitCode, rows.stdout + rows.stderr).toBe(0);
+		const count = Number(
+			(JSON.parse(rows.stdout) as { rows: unknown[][] }).rows[0][0],
+		);
+		expect(count).toBeGreaterThanOrEqual(5); // mobileshot + clipped + hoverbtn x2 + filefixture
+	});
 });
 
 describe.runIf(!hasChrome)("dbg shoot (no Chrome)", () => {
