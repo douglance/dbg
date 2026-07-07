@@ -19,6 +19,7 @@
       "@dbg/tables-browser": ["packages/tables-browser/src/index.ts"],
       "@dbg/tables-native": ["packages/tables-native/src/index.ts"],
       "@dbg/tables-recorder": ["packages/tables-recorder/src/index.ts"],
+      "@dbg/tables-dev": ["packages/tables-dev/src/index.ts"],
       "@dbg/cli": ["packages/cli/src/index.ts"]
     }
   },

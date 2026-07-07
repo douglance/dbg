@@ -452,6 +452,16 @@ The `dbg after --json` verdict shape:
 }
 ```
 
+Retention: capture history is bounded — metadata rows are kept forever, but
+pixels decay oldest-first once past the budgets (200 full frames / 100MB per
+session; `--max-frames`, `--max-bytes`). Decayed frames become ≤320px thumbs,
+then metadata-only (`captures.tier` = 'full'|'thumb'|'meta'). Epoch anchors,
+diff baselines, and the newest capture never decay, so `dbg after` anchors
+stay diffable; a decayed `--at` anchor returns an error suggesting the nearest
+full capture. Raw CDP `events` rows expire after 30 minutes (most-recent 50k
+kept; `--events-ttl`). Check usage with `dbg record --status` (diskBytes,
+fullFrames/thumbFrames/metaFrames, eventsRows).
+
 Recorder SQL tables (join them with `console`, `network`, etc.):
 
 ```sh

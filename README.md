@@ -211,10 +211,10 @@ dbg record --status | --stop
 
 | Command | Description |
 |---|---|
-| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|tablet\|mobile`, `--idle <ms>`) |
+| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|tablet\|mobile`, `--idle <ms>`, `--max-frames <n>`, `--max-bytes <n>`, `--events-ttl <ms>`) |
 | `dbg mark [name]` | Stamp a named epoch in the timeline |
 | `dbg after [name]` | Capture + diff vs anchor: `--at capture:<id>\|mark:<name>\|time:<ts\|10m>\|file:<path>`, `--open` |
-| `dbg timeline` | Self-contained filmstrip HTML (`--open`) |
+| `dbg timeline` | Self-contained filmstrip HTML of the most recent frames (`--open`, `--limit <n>`, default 100) |
 | `dbg replay <id>` | Restore a capture's URL/scroll in the recorder page |
 | `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full-page`, `--out <dir>`, `--name`) |
 
@@ -234,6 +234,19 @@ directly.
 
 Recorder data is queryable like everything else: `captures`, `epochs`, `diffs`,
 and `regions` tables (e.g. `dbg q "SELECT ts, changed_files, epoch_id FROM captures"`).
+
+**Retention.** History is metadata (cheap, kept forever); pixels decay
+(expensive, bounded). PNGs and DOM snapshots are stored content-addressed under
+`.dbg/recordings/recorder/blobs/` — identical frames share one blob. Per
+recording session, at most 200 full-resolution frames and 100MB of blobs are
+kept (`--max-frames`, `--max-bytes`); over budget, the oldest frames decay
+first to ≤320px thumbnails, then to metadata-only rows (`captures.tier`:
+`full` → `thumb` → `meta`), preferring to keep each epoch's first and last
+frames. Never decayed: the newest capture, epoch anchors, and any capture
+referenced by a diff. Raw CDP `events` rows are pruned after 30 minutes
+(`--events-ttl <ms>`, most-recent 50k rows always kept). `dbg record --status`
+reports `diskBytes`, `fullFrames`, `thumbFrames`, `metaFrames`, and
+`eventsRows`; `dbg timeline` embeds the most recent 100 frames (`--limit`).
 
 **Performance.** Sub-second after-verdicts are the design target — agents can
 poll the loop cheaply. Budgets are enforced in CI (`test/perf.test.ts`):

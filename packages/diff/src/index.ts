@@ -249,3 +249,30 @@ export function hitTest<T>(
 		return { cluster, meta: best, overlapArea: bestArea };
 	});
 }
+
+/**
+ * Downscale a PNG to at most `maxWidth` pixels wide (nearest-neighbor,
+ * aspect-preserving). Sources already at/under maxWidth are returned as-is —
+ * re-encoding them would save nothing.
+ */
+export function downscalePng(buffer: Buffer, maxWidth = 320): Buffer {
+	const src = PNG.sync.read(buffer);
+	if (src.width <= maxWidth) return buffer;
+	const scale = maxWidth / src.width;
+	const width = maxWidth;
+	const height = Math.max(1, Math.round(src.height * scale));
+	const dst = new PNG({ width, height });
+	for (let y = 0; y < height; y++) {
+		const srcY = Math.min(src.height - 1, Math.floor(y / scale));
+		for (let x = 0; x < width; x++) {
+			const srcX = Math.min(src.width - 1, Math.floor(x / scale));
+			const from = (srcY * src.width + srcX) * 4;
+			const to = (y * width + x) * 4;
+			dst.data[to] = src.data[from];
+			dst.data[to + 1] = src.data[from + 1];
+			dst.data[to + 2] = src.data[from + 2];
+			dst.data[to + 3] = src.data[from + 3];
+		}
+	}
+	return PNG.sync.write(dst);
+}

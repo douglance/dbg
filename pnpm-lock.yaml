@@ -182,6 +182,15 @@ importers:
         specifier: workspace:*
         version: link:../types
 
+  packages/tables-dev:
+    dependencies:
+      '@dbg/query':
+        specifier: workspace:*
+        version: link:../query
+      '@dbg/types':
+        specifier: workspace:*
+        version: link:../types
+
   packages/tables-native:
     dependencies:
       '@dbg/query':

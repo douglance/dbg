@@ -260,6 +260,14 @@ export type Command =
 			viewport?: { width: number; height: number };
 			// FS quiet period (ms) that starts a new auto epoch; default 10000.
 			idleThresholdMs?: number;
+			// Retention: max full-resolution frames kept per session (default 200);
+			// over budget, non-protected frames decay to thumb, then metadata-only.
+			maxFrames?: number;
+			// Retention: max total blob bytes per session (default 100MB).
+			maxBytes?: number;
+			// TTL for raw CDP `events` rows while recording (default 30min);
+			// the most-recent 50k rows are always kept.
+			eventsTtlMs?: number;
 	  }
 	// Stop recording: detach, kill the managed Chrome, clear recorder state.
 	| { cmd: "record.stop" }
@@ -272,7 +280,8 @@ export type Command =
 	// Writes report.html; open=true additionally spawns `open`.
 	| { cmd: "record.after"; at?: string; open?: boolean }
 	// Render the timeline filmstrip HTML from recorded captures.
-	| { cmd: "record.timeline"; open?: boolean }
+	// limit = max most-recent frames embedded (default 100).
+	| { cmd: "record.timeline"; open?: boolean; limit?: number }
 	// Restore a capture's URL/scroll in the recorder page.
 	| { cmd: "record.replay"; capture: number }
 	// One-off deliberate capture: URL, or a component file rendered in an
@@ -361,6 +370,14 @@ export interface RecordingStatus {
 	lastCaptureTs?: number | null;
 	captureCount?: number;
 	epochCount?: number;
+	// ── Retention visibility ──
+	/** Total bytes of live capture blobs (PNGs + snapshots) on disk. */
+	diskBytes?: number;
+	fullFrames?: number;
+	thumbFrames?: number;
+	metaFrames?: number;
+	/** Raw CDP `events` rows currently in the store. */
+	eventsRows?: number;
 }
 
 export interface OkResponse {

@@ -70,6 +70,14 @@ import {
 } from "./recorder/anchor.js";
 import { parseHmrModules } from "./recorder/hmr.js";
 import {
+	applyRetention,
+	DEFAULT_EVENTS_TTL_MS,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_FULL_FRAMES,
+	type RetentionConfig,
+	sessionRetentionStats,
+} from "./recorder/retention.js";
+import {
 	buildRegions,
 	capturePageSnapshot,
 	diffSnapshots,
@@ -283,6 +291,11 @@ interface RecorderState {
 	watcher: fs.FSWatcher | null;
 	// Serializes trigger-driven captures so screenshots never interleave.
 	captureChain: Promise<void>;
+	// ── Retention (bounded history): budgets enforced after each insert ──
+	retention: RetentionConfig;
+	// TTL for raw CDP `events` rows; pruned every ~60s and on record.stop.
+	eventsTtlMs: number;
+	eventsPruneTimer: NodeJS.Timeout | null;
 }
 
 let recorder: RecorderState | null = null;
@@ -1038,18 +1051,31 @@ async function captureRecorderFrame(
 	if (!opts?.force && recorder && recorder.lastHash === hash) return null;
 
 	const ts = Date.now();
-	fs.mkdirSync(recordingDir, { recursive: true });
-	const pngPath = path.join(recordingDir, `${ts}-${hash}.png`);
-	fs.writeFileSync(pngPath, buffer);
+	// Content-addressed blob store: identical frames (force-captures of
+	// unchanged pixels, reload dupes) share one blob — zero new bytes.
+	const blobsDir = path.join(recordingDir, "blobs");
+	fs.mkdirSync(blobsDir, { recursive: true });
+	const pngPath = path.join(blobsDir, `${hash}.png`);
+	if (!fs.existsSync(pngPath)) {
+		fs.writeFileSync(pngPath, buffer);
+	}
 
 	// DOM/style/component snapshot (Phase 4 blame + style-diff input) —
-	// best-effort; a capture without a snapshot is still a capture.
+	// best-effort; a capture without a snapshot is still a capture. Keyed by
+	// its own content hash: an unchanged DOM re-references the same blob.
 	let snapshotPath: string | null = null;
 	try {
 		const snapshot = await capturePageSnapshot(cdp);
 		if (snapshot.elements.length > 0 || snapshot.components.length > 0) {
-			snapshotPath = path.join(recordingDir, `${ts}-${hash}-snapshot.json.gz`);
-			fs.writeFileSync(snapshotPath, gzipSync(JSON.stringify(snapshot)));
+			const json = JSON.stringify(snapshot);
+			const snapshotHash = createHash("sha256")
+				.update(json)
+				.digest("hex")
+				.slice(0, 16);
+			snapshotPath = path.join(blobsDir, `${snapshotHash}-snapshot.json.gz`);
+			if (!fs.existsSync(snapshotPath)) {
+				fs.writeFileSync(snapshotPath, gzipSync(json));
+			}
 		}
 	} catch {
 		// never fail the capture over its snapshot
@@ -1094,6 +1120,12 @@ async function captureRecorderFrame(
 		recorder.lastCaptureTs = ts;
 		recorder.pendingChangedFiles.clear();
 		recorder.pendingHmrModules.clear();
+		// Enforce retention budgets after every insert (cheap under budget).
+		try {
+			applyRetention(store, session.name, recordingDir, recorder.retention);
+		} catch {
+			// retention must never fail a capture
+		}
 	}
 	return { id, pngPath, hash, snapshotPath };
 }
@@ -1194,6 +1226,11 @@ function recorderEpochCount(sessionName: string): number {
 	return Number(rows[0]?.c ?? 0);
 }
 
+function recorderEventsRows(): number {
+	const rows = store.query("SELECT COUNT(*) AS c FROM events");
+	return Number(rows[0]?.c ?? 0);
+}
+
 function recorderLastCaptureTs(sessionName: string): number | null {
 	const rows = store.query(
 		"SELECT MAX(ts) AS t FROM captures WHERE session_id = ?",
@@ -1203,10 +1240,19 @@ function recorderLastCaptureTs(sessionName: string): number | null {
 	return t == null ? null : Number(t);
 }
 
+/** Positive-integer env override, e.g. DBG_MAX_FRAMES=3 for tests. */
+function envInt(name: string): number | undefined {
+	const raw = process.env[name];
+	if (!raw) return undefined;
+	const value = Number.parseInt(raw, 10);
+	return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 async function handleRecordStart(
 	urls: string[],
 	viewport?: { width: number; height: number },
 	idleThresholdMs?: number,
+	limits?: { maxFrames?: number; maxBytes?: number; eventsTtlMs?: number },
 ): Promise<Response> {
 	if (recorder) {
 		return {
@@ -1336,8 +1382,35 @@ async function handleRecordStart(
 			lastFsEventTs: Date.now(),
 			watcher: null,
 			captureChain: Promise.resolve(),
+			retention: {
+				maxFullFrames:
+					limits?.maxFrames ??
+					envInt("DBG_MAX_FRAMES") ??
+					DEFAULT_MAX_FULL_FRAMES,
+				maxBytes:
+					limits?.maxBytes ?? envInt("DBG_MAX_BYTES") ?? DEFAULT_MAX_BYTES,
+			},
+			eventsTtlMs:
+				limits?.eventsTtlMs ??
+				envInt("DBG_EVENTS_TTL_MS") ??
+				DEFAULT_EVENTS_TTL_MS,
+			eventsPruneTimer: null,
 		};
 		pendingChrome = null;
+
+		// Raw CDP events grow ~556KB/min while recording — prune on a timer.
+		{
+			const r = recorder;
+			r.eventsPruneTimer = setInterval(() => {
+				if (recorder !== r) return;
+				try {
+					store.pruneEvents(r.eventsTtlMs);
+				} catch {
+					// pruning must never break recording
+				}
+			}, 60_000);
+			if (r.eventsPruneTimer.unref) r.eventsPruneTimer.unref();
+		}
 
 		recorder.dpr = await evaluateRecorderDpr(cdp);
 
@@ -1403,6 +1476,7 @@ async function handleRecordStart(
 		};
 	} catch (e) {
 		recorder?.watcher?.close();
+		if (recorder?.eventsPruneTimer) clearInterval(recorder.eventsPruneTimer);
 		recorder = null;
 		pendingChrome = null;
 		const stale = registry.sessions.get(RECORDER_SESSION);
@@ -1423,9 +1497,16 @@ async function handleRecordStop(): Promise<Response> {
 		};
 	}
 
-	const { chrome, sessionName, watcher } = recorder;
+	const { chrome, sessionName, watcher, eventsPruneTimer, eventsTtlMs } =
+		recorder;
 	recorder = null;
 	watcher?.close();
+	if (eventsPruneTimer) clearInterval(eventsPruneTimer);
+	try {
+		store.pruneEvents(eventsTtlMs);
+	} catch {
+		// best-effort final prune
+	}
 
 	const session = registry.sessions.get(sessionName);
 	if (session) {
@@ -1484,6 +1565,7 @@ async function handleRecordMark(name?: string): Promise<Response> {
 
 async function handleRecordStatus(): Promise<Response> {
 	if (!recorder) {
+		const stats = sessionRetentionStats(store, RECORDER_SESSION);
 		return {
 			ok: true,
 			recording: {
@@ -1492,10 +1574,16 @@ async function handleRecordStatus(): Promise<Response> {
 				captureCount: recorderFrameCount(RECORDER_SESSION),
 				epochCount: recorderEpochCount(RECORDER_SESSION),
 				lastCaptureTs: recorderLastCaptureTs(RECORDER_SESSION),
+				diskBytes: stats.diskBytes,
+				fullFrames: stats.fullFrames,
+				thumbFrames: stats.thumbFrames,
+				metaFrames: stats.metaFrames,
+				eventsRows: recorderEventsRows(),
 			},
 		};
 	}
 	const captureCount = recorderFrameCount(recorder.sessionName);
+	const stats = sessionRetentionStats(store, recorder.sessionName);
 	return {
 		ok: true,
 		recording: {
@@ -1509,6 +1597,11 @@ async function handleRecordStatus(): Promise<Response> {
 			lastCaptureTs:
 				recorder.lastCaptureTs ?? recorderLastCaptureTs(recorder.sessionName),
 			session: recorder.sessionName,
+			diskBytes: stats.diskBytes,
+			fullFrames: stats.fullFrames,
+			thumbFrames: stats.thumbFrames,
+			metaFrames: stats.metaFrames,
+			eventsRows: recorderEventsRows(),
 		},
 	};
 }
@@ -1518,7 +1611,7 @@ async function handleRecordStatus(): Promise<Response> {
 function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
 	return store
 		.query(
-			`SELECT id, ts, url, scroll_y, png_path, changed_files, snapshot_path
+			`SELECT id, ts, url, scroll_y, png_path, changed_files, snapshot_path, tier
 			 FROM captures WHERE session_id = ? ORDER BY id`,
 			[sessionName],
 		)
@@ -1531,6 +1624,7 @@ function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
 			changedFiles: safeJsonArray(row.changed_files),
 			snapshotPath:
 				row.snapshot_path == null ? null : String(row.snapshot_path),
+			tier: String(row.tier ?? "full"),
 		}));
 }
 
@@ -1719,6 +1813,27 @@ async function handleRecordAfter(
 		};
 	}
 
+	// Decayed anchor: its full-resolution pixels were pruned by retention.
+	// (Epoch anchors and diff baselines are protected, so this is the
+	// fallback path, not the norm.) Point at the nearest still-full capture.
+	if ((anchor.tier ?? "full") !== "full") {
+		const nearestFull = captures
+			.filter((c) => (c.tier ?? "full") === "full")
+			.reduce<AnchorCaptureRow | null>(
+				(best, c) =>
+					!best || Math.abs(c.ts - anchor.ts) < Math.abs(best.ts - anchor.ts)
+						? c
+						: best,
+				null,
+			);
+		return {
+			ok: false,
+			error: nearestFull
+				? `anchor capture:${anchor.id} has decayed to '${anchor.tier}' (full pixels pruned by retention); nearest full capture is capture:${nearestFull.id} — try: dbg after --at capture:${nearestFull.id}`
+				: `anchor capture:${anchor.id} has decayed to '${anchor.tier}' (full pixels pruned by retention) and no full captures remain`,
+		};
+	}
+
 	let beforePng: Buffer;
 	try {
 		beforePng = fs.readFileSync(anchor.pngPath);
@@ -1880,7 +1995,12 @@ async function handleRecordAfter(
 	}
 }
 
-async function handleRecordTimeline(open?: boolean): Promise<Response> {
+const TIMELINE_DEFAULT_LIMIT = 100;
+
+async function handleRecordTimeline(
+	open?: boolean,
+	limit?: number,
+): Promise<Response> {
 	const captures = recorderCaptureRows(RECORDER_SESSION);
 	if (captures.length === 0) {
 		return { ok: false, error: "no captures recorded yet" };
@@ -1889,24 +2009,40 @@ async function handleRecordTimeline(open?: boolean): Promise<Response> {
 	for (const epoch of recorderEpochRows(RECORDER_SESSION)) {
 		epochNames.set(epoch.id, epoch.name ?? `auto ${epoch.id}`);
 	}
-	const rows = store.query(
-		`SELECT id, ts, url, hmr_modules, epoch_id, png_path, changed_files
-		 FROM captures WHERE session_id = ? ORDER BY id`,
-		[RECORDER_SESSION],
+	// Embed at most the most recent `limit` frames (PNGs are inlined as data
+	// URIs — an unbounded strip would grow without bound with the recording).
+	const frameLimit = limit && limit > 0 ? limit : TIMELINE_DEFAULT_LIMIT;
+	const totalFrames = Number(
+		store.query("SELECT COUNT(*) AS c FROM captures WHERE session_id = ?", [
+			RECORDER_SESSION,
+		])[0]?.c ?? 0,
 	);
+	const rows = store
+		.query(
+			`SELECT id, ts, url, hmr_modules, epoch_id, png_path, changed_files, tier
+			 FROM captures WHERE session_id = ? ORDER BY id DESC LIMIT ?`,
+			[RECORDER_SESSION, frameLimit],
+		)
+		.reverse();
 	const frames: TimelineFrame[] = [];
 	for (const row of rows) {
-		let thumbPng: Buffer;
-		try {
-			thumbPng = fs.readFileSync(String(row.png_path));
-		} catch {
-			continue; // pruned/missing PNGs simply drop out of the strip
+		const tier = String(row.tier ?? "full") as "full" | "thumb" | "meta";
+		// Meta-tier frames keep their annotations (that's the point) and render
+		// as a placeholder card; full/thumb frames embed their blob.
+		let thumbPng: Buffer | undefined;
+		if (tier !== "meta") {
+			try {
+				thumbPng = fs.readFileSync(String(row.png_path));
+			} catch {
+				continue; // externally-pruned/missing PNGs drop out of the strip
+			}
 		}
 		const epochId = row.epoch_id == null ? null : Number(row.epoch_id);
 		frames.push({
 			id: Number(row.id),
 			ts: Number(row.ts),
 			thumbPng,
+			tier,
 			url: String(row.url ?? ""),
 			changedFiles: safeJsonArray(row.changed_files),
 			hmrModules: safeJsonArray(row.hmr_modules),
@@ -1944,13 +2080,19 @@ async function handleRecordTimeline(open?: boolean): Promise<Response> {
 		timelinePath,
 		renderTimeline({
 			frames,
-			meta: { generatedAt: new Date().toISOString() },
+			meta: { generatedAt: new Date().toISOString(), totalFrames },
 		}),
 	);
 	if (open) openInBrowser(timelinePath);
+	const shownNote =
+		totalFrames > frames.length
+			? ` (showing last ${frames.length} of ${totalFrames})`
+			: "";
 	return {
 		ok: true,
-		messages: [`timeline (${frames.length} frames): ${timelinePath}`],
+		messages: [
+			`timeline (${frames.length} frames${shownNote}): ${timelinePath}`,
+		],
 	};
 }
 
@@ -3112,7 +3254,11 @@ async function dispatch(cmd: Command): Promise<Response> {
 		case "targets":
 			return handleTargets(cmd.port, cmd.host);
 		case "record.start":
-			return handleRecordStart(cmd.urls, cmd.viewport, cmd.idleThresholdMs);
+			return handleRecordStart(cmd.urls, cmd.viewport, cmd.idleThresholdMs, {
+				maxFrames: cmd.maxFrames,
+				maxBytes: cmd.maxBytes,
+				eventsTtlMs: cmd.eventsTtlMs,
+			});
 		case "record.stop":
 			return handleRecordStop();
 		case "record.status":
@@ -3122,7 +3268,7 @@ async function dispatch(cmd: Command): Promise<Response> {
 		case "record.after":
 			return handleRecordAfter(cmd.at, cmd.open);
 		case "record.timeline":
-			return handleRecordTimeline(cmd.open);
+			return handleRecordTimeline(cmd.open, cmd.limit);
 		case "record.replay":
 			return handleRecordReplay(cmd.capture);
 		case "record.shoot":

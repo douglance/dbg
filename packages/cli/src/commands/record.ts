@@ -58,6 +58,30 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 				.describe(
 					"FS quiet period in ms that starts a new auto epoch (default 10000)",
 				),
+			maxFrames: z.coerce
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe(
+					"Retention: max full-resolution frames kept (default 200); older frames decay to thumbnails, then metadata-only",
+				),
+			maxBytes: z.coerce
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe(
+					"Retention: max total capture blob bytes on disk (default 100MB)",
+				),
+			eventsTtl: z.coerce
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe(
+					"TTL in ms for raw CDP events rows while recording (default 30min; most-recent 50k rows always kept)",
+				),
 		}),
 		async run({ args, options }) {
 			if (options.stop) {
@@ -76,6 +100,9 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 			if (options.idle !== undefined) {
 				cmd.idleThresholdMs = options.idle;
 			}
+			if (options.maxFrames !== undefined) cmd.maxFrames = options.maxFrames;
+			if (options.maxBytes !== undefined) cmd.maxBytes = options.maxBytes;
+			if (options.eventsTtl !== undefined) cmd.eventsTtlMs = options.eventsTtl;
 			return await sendCommand(cmd);
 		},
 	});
@@ -115,10 +142,17 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 			"Render the recording as a filmstrip HTML page (frames annotated with saved files / HMR modules / epochs)",
 		options: z.object({
 			open: z.boolean().optional().describe("Open timeline.html in a browser"),
+			limit: z.coerce
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe("Max most-recent frames to embed (default 100)"),
 		}),
 		async run({ options }) {
 			const cmd: Command = { cmd: "record.timeline" };
 			if (options.open) cmd.open = true;
+			if (options.limit !== undefined) cmd.limit = options.limit;
 			return await sendCommand(cmd);
 		},
 	});

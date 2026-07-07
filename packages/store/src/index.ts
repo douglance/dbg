@@ -14,7 +14,7 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const KNOWN_TABLES = ["events", "captures", "epochs", "diffs", "regions"];
 
@@ -39,7 +39,11 @@ export interface CaptureRecord {
 	hmrModules?: string[];
 	epochId?: number | null;
 	snapshotPath?: string | null;
+	/** Retention tier: 'full' (default) | 'thumb' | 'meta'. */
+	tier?: CaptureTier;
 }
+
+export type CaptureTier = "full" | "thumb" | "meta";
 
 export interface EpochRecord {
 	ts?: number;
@@ -173,7 +177,8 @@ export class EventStore {
 				changed_files TEXT NOT NULL DEFAULT '[]',
 				hmr_modules TEXT NOT NULL DEFAULT '[]',
 				epoch_id INTEGER,
-				snapshot_path TEXT
+				snapshot_path TEXT,
+				tier TEXT NOT NULL DEFAULT 'full'
 			)
 		`);
 		this.db.exec("CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts)");
@@ -226,8 +231,8 @@ export class EventStore {
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",
 		);
 		this.insertCaptureStmt = this.db.prepare(
-			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path, tier)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		this.insertEpochStmt = this.db.prepare(
 			"INSERT INTO epochs (ts, session_id, name, auto) VALUES (?, ?, ?, ?)",
@@ -301,6 +306,7 @@ export class EventStore {
 			JSON.stringify(capture.hmrModules ?? []),
 			capture.epochId ?? null,
 			capture.snapshotPath ?? null,
+			capture.tier ?? "full",
 		);
 		return Number(result.lastInsertRowid);
 	}
@@ -350,6 +356,43 @@ export class EventStore {
 			epoch.auto ? 1 : 0,
 		);
 		return Number(result.lastInsertRowid);
+	}
+
+	/** Execute a write statement (UPDATE/DELETE); returns affected row count. */
+	run(sql: string, params: unknown[] = []): number {
+		if (this.closed) return 0;
+		this.flush();
+		const stmt = this.db.prepare(sql);
+		const runFn = stmt.run.bind(stmt) as (...args: unknown[]) => {
+			changes: number | bigint;
+		};
+		return Number(runFn(...params).changes);
+	}
+
+	/**
+	 * Delete raw `events` rows older than ttlMs, but always keep the
+	 * most-recent `floorRows` rows regardless of age. Returns rows deleted.
+	 *
+	 * Interaction with `dbg after` deltas: console/network deltas only read
+	 * events NEWER than the anchor capture's timestamp, and anchor captures
+	 * are protected from decay — so pruning rows older than the TTL window
+	 * never removes data a delta within that window can reference.
+	 */
+	pruneEvents(ttlMs: number, floorRows = 50_000): number {
+		if (this.closed) return 0;
+		this.flush();
+		const floorStmt = this.db.prepare(
+			"SELECT MIN(id) AS floor FROM (SELECT id FROM events ORDER BY id DESC LIMIT ?)",
+		);
+		const getFloor = floorStmt.get.bind(floorStmt) as (
+			...args: unknown[]
+		) => { floor?: number | bigint | null } | undefined;
+		const floorId = getFloor(floorRows)?.floor;
+		if (floorId == null) return 0;
+		return this.run("DELETE FROM events WHERE ts < ? AND id < ?", [
+			Date.now() - ttlMs,
+			Number(floorId),
+		]);
 	}
 
 	query(sql: string, params: unknown[] = []): Record<string, unknown>[] {

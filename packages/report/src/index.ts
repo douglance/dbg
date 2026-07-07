@@ -71,7 +71,11 @@ export interface ReportInput {
 
 export interface TimelineFrame {
 	ts: number;
-	thumbPng: Buffer;
+	/** Frame pixels. Absent for metadata-only frames (retention-decayed):
+	 * those render as a placeholder card with annotations intact. */
+	thumbPng?: Buffer;
+	/** Retention tier of the capture ('full' | 'thumb' | 'meta'). */
+	tier?: "full" | "thumb" | "meta";
 	url: string;
 	changedFiles?: string[];
 	hmrModules?: string[];
@@ -83,7 +87,9 @@ export interface TimelineFrame {
 
 export interface TimelineInput {
 	frames: TimelineFrame[];
-	meta?: { generatedAt?: string };
+	/** totalFrames: full capture count when the strip is truncated to the
+	 * most recent N — the header then reads "showing last N of M". */
+	meta?: { generatedAt?: string; totalFrames?: number };
 }
 
 const ESCAPES: Record<string, string> = {
@@ -325,6 +331,7 @@ const TIMELINE_CSS = `${SHARED_CSS}
 .instruct{background:#161b24;border:1px solid #3a5a8a;border-radius:10px;padding:16px;margin-top:16px;max-width:720px}
 .instruct p{font-size:12px;color:#aeb8c9;margin:6px 0}
 .instruct .fname{color:#dbe9ff}
+.frame .placeholder{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;border:1px dashed #3a4458;background:#0a0d12;border-radius:4px;color:#8b95a7;font-size:11px;text-align:center;padding:8px}
 `;
 
 const TIMELINE_JS = `
@@ -387,8 +394,11 @@ function renderFrame(frame: TimelineFrame, index: number): string {
 	const epoch = frame.epochName
 		? `<div class="chips"><span class="badge amber">${esc(frame.epochName)}</span></div>`
 		: "";
+	const visual = frame.thumbPng
+		? `<img src="${pngUri(frame.thumbPng)}" alt="frame ${index}">`
+		: `<div class="placeholder">pixels pruned (metadata only)</div>`;
 	return `<figure class="frame" data-id="${esc(String(id))}" data-ts="${frame.ts}" data-label="${esc(label)}" tabindex="0">
-	<img src="${pngUri(frame.thumbPng)}" alt="frame ${index}">
+	${visual}
 	<figcaption>
 		<div class="time">${esc(iso)}</div>
 		<div class="url" title="${esc(frame.url)}">${esc(frame.url)}</div>
@@ -406,6 +416,11 @@ export function renderTimeline(input: TimelineInput): string {
 	const generated = input.meta?.generatedAt
 		? ` · generated ${esc(input.meta.generatedAt)}`
 		: "";
+	const total = input.meta?.totalFrames;
+	const frameCountLabel =
+		total !== undefined && total > input.frames.length
+			? `showing last ${input.frames.length} of ${total} frames`
+			: `${input.frames.length} frames`;
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -417,7 +432,7 @@ export function renderTimeline(input: TimelineInput): string {
 <body>
 <header>
 	<h1>dbg — timeline</h1>
-	<div class="meta">${input.frames.length} frames${generated}</div>
+	<div class="meta">${frameCountLabel}${generated}</div>
 	<div class="hint">Click two frames to diff them.</div>
 </header>
 <div class="strip">

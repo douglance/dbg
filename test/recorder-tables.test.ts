@@ -62,6 +62,7 @@ describe("recorder virtual tables", () => {
 			"hmr_modules",
 			"epoch_id",
 			"snapshot_path",
+			"tier",
 		]);
 		expect(result.rows).toHaveLength(1);
 		expect(result.rows[0][2]).toBe("recorder");

@@ -14,6 +14,8 @@ export interface AnchorCaptureRow {
 	changedFiles: string[];
 	/** Gzipped DOM/style/component snapshot on disk (Phase 4), if captured. */
 	snapshotPath?: string | null;
+	/** Retention tier: 'full' | 'thumb' | 'meta'. Absent rows mean 'full'. */
+	tier?: string;
 }
 
 export interface AnchorEpochRow {
