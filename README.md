@@ -250,8 +250,15 @@ by method + normalized URL pattern → added/removed/status-changed/duration-del
 `stateChanges` (added/removed/changed local & sessionStorage keys, from the
 per-capture `state_snapshots`), and `a11yNew` (accessibility issues new since the
 anchor: missing alt, control/button without name, control without label,
-duplicate landmark, missing title). Each section is individually skippable
-(`--skip-network`/`--skip-state`/`--skip-a11y`). `dbg why [substring]` walks the
+duplicate landmark, missing title), and `perfDelta` (Plan X: ΔLCP, ΔCLS from new
+layout shift, new longtask count, ΔJSHeap, Δbundle_bytes, interaction count/max)
+sourced from a buffered `PerformanceObserver` plus a per-capture
+`Performance.getMetrics` subset and a per-nav Script/Stylesheet byte total in the
+`perf_samples` table — nav_id increments per hard navigation, so CLS/LCP are
+per-hard-nav on the HMR-alive recorder. Each section is individually skippable
+(`--skip-network`/`--skip-state`/`--skip-a11y`/`--skip-perf`); `--perf-budget
+lcp=2500,cls=0.1` fails on breach. perfDelta is pure store reads (no extra CDP
+round-trip to `after`). `dbg why [substring]` walks the
 unified timeline back from an error to ranked causes — the recent edits (weighted
 by recency + whether their file is in the stack trace), the enclosing epoch, the
 nearest commit, and the active agent prompt — and phrases a one-line `answer`
@@ -354,6 +361,7 @@ edits, git commits, screenshots, and agent history join directly:
 | `edits` | First-class file-edit stream (one row per fs-watch event during recording) | `id`, `ts`, `path`, `epoch_id`, `session_id` |
 | `state_snapshots` | Per-capture local/sessionStorage dump | `capture_id`, `kind`, `data` |
 | `a11y_issues` | Per-capture accessibility issues | `capture_id`, `rule`, `selector`, `detail` |
+| `perf_samples` | Perf flight recorder: observer batches + per-capture metrics/bundle-bytes | `ts`, `nav_id`, `capture_id`, `metric`, `value`, `detail` |
 | `taps` | Logpoints (never-pausing conditioned breakpoints) | `id`, `session_id`, `file`, `line`, `expr`, `url_regex` |
 | `tap_hits` | Each tap fire | `tap_id`, `ts`, `value` |
 | `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |

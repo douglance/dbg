@@ -14,7 +14,7 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 const KNOWN_TABLES = [
 	"events",
@@ -27,6 +27,7 @@ const KNOWN_TABLES = [
 	"a11y_issues",
 	"taps",
 	"tap_hits",
+	"perf_samples",
 ];
 
 export interface EventRecord {
@@ -99,6 +100,15 @@ export interface A11yIssueRecord {
 	detail: string;
 }
 
+export interface PerfSampleRecord {
+	ts?: number;
+	navId: number;
+	captureId: number | null;
+	metric: string;
+	value: number;
+	detail: string | null;
+}
+
 export interface TapRecord {
 	sessionId: string;
 	breakpointId: string;
@@ -148,6 +158,7 @@ export class EventStore {
 	private insertEditStmt!: StatementSync;
 	private insertStateSnapshotStmt!: StatementSync;
 	private insertA11yIssueStmt!: StatementSync;
+	private insertPerfSampleStmt!: StatementSync;
 	private insertTapStmt!: StatementSync;
 	private insertTapHitStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
@@ -333,6 +344,24 @@ export class EventStore {
 			"CREATE INDEX IF NOT EXISTS idx_a11y_issues_capture_id ON a11y_issues(capture_id)",
 		);
 
+		// Plan X perf flight recorder: PerformanceObserver batches (capture_id
+		// NULL) + per-capture Performance.getMetrics / bundle_bytes samples.
+		// Metadata (kept; not pruned by retention/TTL), indexed by capture_id.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS perf_samples (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				nav_id INTEGER NOT NULL,
+				capture_id INTEGER,
+				metric TEXT NOT NULL,
+				value REAL NOT NULL,
+				detail TEXT
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_perf_samples_capture_id ON perf_samples(capture_id)",
+		);
+
 		// Taps (logpoints): a conditioned breakpoint that never pauses, emitting
 		// an expression value via a console sentinel. tap_hits records each fire.
 		// Metadata — never pruned by retention/TTL.
@@ -392,6 +421,9 @@ export class EventStore {
 		);
 		this.insertA11yIssueStmt = this.db.prepare(
 			"INSERT INTO a11y_issues (ts, capture_id, rule, selector, detail) VALUES (?, ?, ?, ?, ?)",
+		);
+		this.insertPerfSampleStmt = this.db.prepare(
+			"INSERT INTO perf_samples (ts, nav_id, capture_id, metric, value, detail) VALUES (?, ?, ?, ?, ?, ?)",
 		);
 		this.insertTapStmt = this.db.prepare(
 			`INSERT INTO taps (session_id, breakpoint_id, file, line, expr, url_regex, enabled, created_ts)
@@ -549,6 +581,25 @@ export class EventStore {
 				issue.rule,
 				issue.selector,
 				issue.detail,
+			);
+			ids.push(Number(result.lastInsertRowid));
+		}
+		return ids;
+	}
+
+	/** Insert perf_samples rows (observer batch or per-capture metrics); returns
+	 * inserted ids. */
+	insertPerfSamples(rows: PerfSampleRecord[]): number[] {
+		if (this.closed) return [];
+		const ids: number[] = [];
+		for (const row of rows) {
+			const result = this.insertPerfSampleStmt.run(
+				row.ts ?? Date.now(),
+				row.navId,
+				row.captureId ?? null,
+				row.metric,
+				row.value,
+				row.detail ?? null,
 			);
 			ids.push(Number(result.lastInsertRowid));
 		}

@@ -1,7 +1,6 @@
 // Target process management: spawn with --inspect-brk, extract debug port
 
 import { type ChildProcess, spawn } from "node:child_process";
-import * as net from "node:net";
 
 export interface SpawnResult {
 	child: ChildProcess;
@@ -21,12 +20,12 @@ export async function spawnTarget(command: string): Promise<SpawnResult> {
 
 	const [cmd, ...args] = parts;
 
-	// Find a free port for --inspect-brk
-	const inspectPort = await findFreePort();
-
-	// Filter out any existing --inspect* flags from user's command
+	// Filter out any existing --inspect* flags from user's command.
+	// Use --inspect-brk=0 so Node atomically binds a free port itself; the actual
+	// port is parsed from stderr below. Pre-selecting a port (bind :0 → close →
+	// spawn) races under parallel load — two spawns can grab the same freed port.
 	const filteredArgs = args.filter((a) => !a.startsWith("--inspect"));
-	const inspectArgs = [`--inspect-brk=${inspectPort}`, ...filteredArgs];
+	const inspectArgs = ["--inspect-brk=0", ...filteredArgs];
 
 	const child = spawn(cmd, inspectArgs, {
 		stdio: ["pipe", "pipe", "pipe"],
@@ -90,18 +89,6 @@ export function killTarget(child: ChildProcess): void {
 			}
 		}, 2000);
 	}
-}
-
-function findFreePort(): Promise<number> {
-	return new Promise((resolve, reject) => {
-		const srv = net.createServer();
-		srv.listen(0, "127.0.0.1", () => {
-			const addr = srv.address() as net.AddressInfo;
-			const port = addr.port;
-			srv.close(() => resolve(port));
-		});
-		srv.on("error", reject);
-	});
 }
 
 function parseCommand(command: string): string[] {

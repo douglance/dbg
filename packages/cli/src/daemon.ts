@@ -78,6 +78,12 @@ import {
 import { type AxTree, computeA11yIssues } from "./recorder/a11y.js";
 import { parseHmrModules } from "./recorder/hmr.js";
 import {
+	computePerfDelta,
+	parsePerfBatch,
+	type PerfDelta,
+	type PerfSampleRow,
+} from "./perf.js";
+import {
 	diffNetwork,
 	type NetRequest,
 	type NetworkDiff,
@@ -314,6 +320,52 @@ const MUTATION_OBSERVER_SOURCE = `(() => {
 	install();
 })();`;
 
+// Plan X perf flight recorder: binding the injected observer flushes batches
+// through, and the source that installs one buffered PerformanceObserver per
+// type. Buffered replay needs per-type observe({type,buffered:true}).
+const PERF_BINDING = "__dbg_perf__";
+const PERF_OBSERVER_SOURCE = `(() => {
+	if (window.__dbg_perf_observer__) return;
+	window.__dbg_perf_observer__ = true;
+	if (typeof PerformanceObserver === 'undefined') return;
+	const buf = [];
+	const flush = () => {
+		if (buf.length === 0) return;
+		try { window.${PERF_BINDING}(JSON.stringify(buf.splice(0))); } catch (_e) {}
+	};
+	const push = (o) => { buf.push(o); if (buf.length >= 20) flush(); };
+	const origin = performance.timeOrigin;
+	const stamp = (e) => Math.round(origin + e.startTime);
+	const observe = (type, opts, map) => {
+		try {
+			new PerformanceObserver((list) => {
+				for (const entry of list.getEntries()) {
+					const o = map(entry);
+					if (o) push(o);
+				}
+			}).observe(Object.assign({ type: type, buffered: true }, opts));
+		} catch (_e) {}
+	};
+	observe('largest-contentful-paint', {}, (e) => ({ type: 'largest-contentful-paint', name: e.name || '', ts: stamp(e), value: e.startTime }));
+	observe('layout-shift', {}, (e) => e.hadRecentInput ? null : ({ type: 'layout-shift', name: '', ts: stamp(e), value: e.value }));
+	observe('longtask', {}, (e) => ({ type: 'longtask', name: e.name || '', ts: stamp(e), value: e.duration }));
+	observe('paint', {}, (e) => ({ type: 'paint', name: e.name || '', ts: stamp(e), value: e.startTime }));
+	observe('event', { durationThreshold: 40 }, (e) => ({ type: 'event', name: e.name || '', ts: stamp(e), value: e.duration }));
+	setInterval(flush, 1000);
+	addEventListener('pagehide', flush);
+})();`;
+
+// Documented Performance.getMetrics subset stored per capture.
+const CAPTURE_METRIC_NAMES = new Set([
+	"JSHeapUsedSize",
+	"JSHeapTotalSize",
+	"Nodes",
+	"Documents",
+	"JSEventListeners",
+	"LayoutCount",
+	"RecalcStyleCount",
+]);
+
 interface RecorderState {
 	chrome: LaunchedChrome;
 	sessionName: string;
@@ -345,6 +397,14 @@ interface RecorderState {
 	// TTL for raw CDP `events` rows; pruned every ~60s and on record.stop.
 	eventsTtlMs: number;
 	eventsPruneTimer: NodeJS.Timeout | null;
+	// ── Plan X: perf flight recorder ──
+	// Increments per main-frame navigation observed by the daemon; perf batches
+	// and per-capture samples are stamped with the nav_id current at receipt.
+	navId: number;
+	// requestId → CDP resource type, to attribute loadingFinished bytes.
+	resourceTypeById: Map<string, string>;
+	// nav_id → cumulative Script/Stylesheet encoded bytes for that navigation.
+	navBundleBytes: Map<number, number>;
 }
 
 let recorder: RecorderState | null = null;
@@ -1149,6 +1209,37 @@ function storeA11yIssues(captureId: number, tree: AxTree): void {
 	}
 }
 
+/** Plan X: best-effort Performance.getMetrics subset → perf_samples rows for a
+ * capture. One CDP call, swallowed on failure; never breaks a capture. */
+async function sampleCaptureMetrics(
+	cdp: CdpClientWrapper,
+	captureId: number,
+	navId: number,
+	ts: number,
+): Promise<void> {
+	try {
+		const res = (await cdp.send("Performance.getMetrics", {})) as {
+			metrics?: Array<{ name: string; value: number }>;
+		};
+		const rows: PerfSampleRow[] = [];
+		for (const m of res.metrics ?? []) {
+			if (!CAPTURE_METRIC_NAMES.has(m.name)) continue;
+			if (!Number.isFinite(m.value)) continue;
+			rows.push({
+				ts,
+				navId,
+				captureId,
+				metric: m.name,
+				value: m.value,
+				detail: null,
+			});
+		}
+		if (rows.length > 0) store.insertPerfSamples(rows);
+	} catch {
+		// Performance domain unavailable — skip
+	}
+}
+
 /** Load a capture's stored storage snapshot (both kinds) for state diffing. */
 function loadStorageSnapshot(captureId: number): StorageSnapshot {
 	const snap: StorageSnapshot = { localStorage: {}, sessionStorage: {} };
@@ -1278,6 +1369,23 @@ async function captureRecorderFrame(
 	// Plan V: per-capture app-state + a11y metadata (best-effort).
 	await collectCaptureState(cdp, id);
 	if (ax) storeA11yIssues(id, ax.tree);
+	// Plan X: per-capture perf metrics + running per-nav bundle-bytes snapshot.
+	{
+		const navId = recorder?.navId ?? 1;
+		await sampleCaptureMetrics(cdp, id, navId, ts);
+		if (recorder) {
+			store.insertPerfSamples([
+				{
+					ts,
+					navId,
+					captureId: id,
+					metric: "bundle_bytes",
+					value: recorder.navBundleBytes.get(navId) ?? 0,
+					detail: null,
+				},
+			]);
+		}
+	}
 	if (recorder) {
 		recorder.lastHash = hash;
 		recorder.lastCaptureTs = ts;
@@ -1496,6 +1604,15 @@ async function handleRecordStart(
 		await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
 			source: MUTATION_OBSERVER_SOURCE,
 		});
+		// Plan X: buffered PerformanceObserver → __dbg_perf__ binding batches.
+		try {
+			await cdp.send("Runtime.addBinding", { name: PERF_BINDING });
+			await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+				source: PERF_OBSERVER_SOURCE,
+			});
+		} catch {
+			// non-fatal: perf samples simply won't be collected
+		}
 		// Plan V: accessibility tree access for per-capture a11y issues.
 		try {
 			await cdp.send("Accessibility.enable", {});
@@ -1504,13 +1621,27 @@ async function handleRecordStart(
 		}
 		const rawClient = cdp.getClient();
 		rawClient?.on("Runtime.bindingCalled", (params: unknown) => {
-			const p = params as { name?: string };
-			if (p.name !== MUTATION_BINDING) return;
-			void triggerRecorderCapture("mutation");
+			const p = params as { name?: string; payload?: string };
+			if (p.name === MUTATION_BINDING) {
+				void triggerRecorderCapture("mutation");
+				return;
+			}
+			if (p.name === PERF_BINDING) {
+				const r = recorder;
+				if (!r) return;
+				try {
+					const rows = parsePerfBatch(p.payload ?? "", r.navId);
+					if (rows.length > 0) store.insertPerfSamples(rows);
+				} catch {
+					// perf ingestion is best-effort
+				}
+			}
 		});
 		rawClient?.on("Page.frameNavigated", (params: unknown) => {
 			const p = params as { frame?: { parentId?: string } };
 			if (p.frame?.parentId) return; // main frame only
+			// Plan X: bump nav_id at nav so post-nav perf entries get the new id.
+			if (recorder) recorder.navId += 1;
 			void onRecorderNavigated();
 		});
 		rawClient?.on("Network.webSocketFrameReceived", (params: unknown) => {
@@ -1519,6 +1650,28 @@ async function handleRecordStart(
 			const p = params as { response?: { payloadData?: string } };
 			for (const mod of parseHmrModules(p.response?.payloadData ?? "")) {
 				r.pendingHmrModules.add(mod);
+			}
+		});
+		// Plan X: track Script/Stylesheet encoded bytes per nav (do not rely on
+		// TTL-pruned events); materialized into a bundle_bytes row per capture.
+		rawClient?.on("Network.responseReceived", (params: unknown) => {
+			const r = recorder;
+			if (!r) return;
+			const p = params as { requestId?: string; type?: string };
+			if (typeof p.requestId === "string" && typeof p.type === "string") {
+				r.resourceTypeById.set(p.requestId, p.type);
+			}
+		});
+		rawClient?.on("Network.loadingFinished", (params: unknown) => {
+			const r = recorder;
+			if (!r) return;
+			const p = params as { requestId?: string; encodedDataLength?: number };
+			const type = p.requestId
+				? r.resourceTypeById.get(p.requestId)
+				: undefined;
+			if (type === "Script" || type === "Stylesheet") {
+				const prev = r.navBundleBytes.get(r.navId) ?? 0;
+				r.navBundleBytes.set(r.navId, prev + (p.encodedDataLength ?? 0));
 			}
 		});
 
@@ -1565,6 +1718,9 @@ async function handleRecordStart(
 				envInt("DBG_EVENTS_TTL_MS") ??
 				DEFAULT_EVENTS_TTL_MS,
 			eventsPruneTimer: null,
+			navId: 1,
+			resourceTypeById: new Map(),
+			navBundleBytes: new Map(),
 		};
 		pendingChrome = null;
 
@@ -2032,7 +2188,12 @@ function openInBrowser(filePath: string): void {
 async function handleRecordAfter(
 	at?: string,
 	open?: boolean,
-	sections?: { noNetwork?: boolean; noState?: boolean; noA11y?: boolean },
+	sections?: {
+		noNetwork?: boolean;
+		noState?: boolean;
+		noA11y?: boolean;
+		noPerf?: boolean;
+	},
 ): Promise<Response> {
 	if (!recorder) {
 		return {
@@ -2098,6 +2259,7 @@ async function handleRecordAfter(
 		}
 		const afterPng = fs.readFileSync(frame.pngPath);
 		const diff = diffPngs(beforePng, afterPng);
+		const afterTs = recorder.lastCaptureTs ?? Date.now();
 
 		const consoleNew = consoleDeltaSince(session, anchor.ts).errors;
 		const exceptionsNew = session.state.exceptions
@@ -2129,6 +2291,30 @@ async function handleRecordAfter(
 			);
 			a11yNew = loadA11yIssues(frame.id).filter(
 				(i) => !a11yBefore.has(`${i.rule}|${i.selector}`),
+			);
+		}
+
+		// ── Plan X: perf delta — pure store reads, no extra CDP round-trips. ──
+		let perfDelta: PerfDelta | undefined;
+		if (!sections?.noPerf) {
+			const perfRows: PerfSampleRow[] = store
+				.query(
+					"SELECT ts, nav_id, capture_id, metric, value, detail FROM perf_samples",
+				)
+				.map((row) => ({
+					ts: Number(row.ts),
+					navId: Number(row.nav_id),
+					captureId: row.capture_id == null ? null : Number(row.capture_id),
+					metric: String(row.metric),
+					value: Number(row.value),
+					detail: row.detail == null ? null : String(row.detail),
+				}));
+			perfDelta = computePerfDelta(
+				perfRows,
+				anchor.id,
+				frame.id,
+				anchor.ts,
+				afterTs,
 			);
 		}
 
@@ -2201,6 +2387,7 @@ async function handleRecordAfter(
 					networkDiff,
 					stateChanges,
 					a11yIssues: a11yNew,
+					perfDelta,
 				},
 			],
 			meta: {
@@ -2242,7 +2429,6 @@ async function handleRecordAfter(
 			true,
 		);
 
-		const afterTs = recorder.lastCaptureTs ?? Date.now();
 		return {
 			ok: true,
 			messages: [
@@ -2265,6 +2451,7 @@ async function handleRecordAfter(
 			networkDiff,
 			stateChanges,
 			a11yNew,
+			perfDelta,
 			regions,
 			styleChanges,
 			reportPath,
@@ -3876,6 +4063,7 @@ async function dispatch(cmd: Command): Promise<Response> {
 				noNetwork: cmd.noNetwork,
 				noState: cmd.noState,
 				noA11y: cmd.noA11y,
+				noPerf: cmd.noPerf,
 			});
 		case "record.timeline":
 			return handleRecordTimeline(cmd.open, cmd.limit);

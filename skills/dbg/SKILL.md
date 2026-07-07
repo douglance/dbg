@@ -197,6 +197,7 @@ dbg mark before-fix                  # stamp a named epoch (auto-epochs happen o
 dbg after --json                     # capture now, diff vs anchor: pixels + component blame
                                      #   + style deltas + new console/network errors + report.html
 dbg after --at mark:before-fix       # explicit anchors: capture:<id> | mark:<name> | time:<ts|10m> | file:<path>
+dbg after --perf-budget lcp=2500,cls=0.1   # perfDelta (ΔLCP/ΔCLS/bundle); nonzero exit on breach (--skip-perf to omit)
 dbg why                              # blame the most recent error → ranked edit/epoch/commit/prompt
 dbg why "coupon"                     # blame the most recent error whose text contains "coupon"
 dbg timeline                         # filmstrip HTML of every capture with annotations
@@ -221,6 +222,16 @@ side-by-side / wipe / onion-skin / diff-overlay views). Add `--open` for humans.
 - `a11yNew` — accessibility issues present in the after capture but not the
   anchor (five rules: missing alt, control/button without name, control without
   label, duplicate landmark, missing document title).
+- `perfDelta` (Plan X) — ΔLCP, ΔCLS (new layout shift during flows), new
+  longtask count, ΔJSHeap, Δbundle_bytes, and interaction count/max-duration.
+  Sourced from a buffered `PerformanceObserver` (LCP/CLS/longtask/paint/event)
+  plus a per-capture `Performance.getMetrics` subset (`JSHeapUsedSize`,
+  `JSHeapTotalSize`, `Nodes`, `Documents`, `JSEventListeners`, `LayoutCount`,
+  `RecalcStyleCount`) and a per-nav Script/Stylesheet `bundle_bytes` total.
+  `nav_id` increments per main-frame navigation observed by the daemon; entries
+  are stamped with the nav_id current at receipt. The recorder loop is HMR-alive
+  (not reload-heavy), so CLS/LCP are per-hard-nav — they reset only on real
+  document navigations. Rows land in the `perf_samples` table.
 
 `dbg why [substring]` walks the substrate back from the target error to ranked
 causes and returns a `why` verdict + one-line `answer`, e.g. *"'Cannot read x of
@@ -231,8 +242,12 @@ agent prompt. Reads errors from the **persisted** event store, so it works after
 `record --stop` (subject to the events TTL).
 
 Each `after` section is individually skippable to stay fast: `--skip-network`,
-`--skip-state`, `--skip-a11y` (measured `after` ≈ 220ms with all on, so no
-budget bump was needed).
+`--skip-state`, `--skip-a11y`, `--skip-perf` (measured `after` ≈ 220ms with all
+on — perfDelta is pure store reads and adds no CDP round-trip to `after`, so no
+budget bump was needed; the only cold cost is one `Performance.getMetrics` call
+per capture, best-effort and parallel to snapshot work).
+`--perf-budget lcp=2500,cls=0.1` fails (nonzero exit) when the after-side delta
+breaches a budget (keys: `lcp`, `cls`, `longtask`, `jsheap`, `bundle`).
 
 ### Deliberate Captures (shoot)
 

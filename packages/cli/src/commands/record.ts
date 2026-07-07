@@ -3,6 +3,7 @@
 import { type Cli, z } from "incur";
 import type { Command } from "@dbg/types";
 import { sendCommand } from "../daemon-client.js";
+import { checkPerfBudget, parsePerfBudget } from "../perf.js";
 
 export const VIEWPORT_PRESETS: Record<
 	string,
@@ -136,6 +137,13 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 				.boolean()
 				.optional()
 				.describe("Skip the new-a11y-issues section"),
+			skipPerf: z.boolean().optional().describe("Skip the perf-delta section"),
+			perfBudget: z
+				.string()
+				.optional()
+				.describe(
+					"Fail (nonzero exit) if delta breaches, e.g. lcp=2500,cls=0.1",
+				),
 		}),
 		async run({ args, options }) {
 			const cmd: Command = { cmd: "record.after" };
@@ -148,7 +156,18 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 			if (options.skipNetwork) cmd.noNetwork = true;
 			if (options.skipState) cmd.noState = true;
 			if (options.skipA11y) cmd.noA11y = true;
-			return await sendCommand(cmd);
+			if (options.skipPerf) cmd.noPerf = true;
+			const response = await sendCommand(cmd);
+			if (options.perfBudget && response.ok && response.perfDelta) {
+				const breaches = checkPerfBudget(
+					response.perfDelta,
+					parsePerfBudget(options.perfBudget),
+				);
+				if (breaches.length) {
+					throw new Error(`perf budget breach:\n${breaches.join("\n")}`);
+				}
+			}
+			return response;
 		},
 	});
 

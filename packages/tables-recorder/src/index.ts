@@ -5,6 +5,7 @@ import { capturesTable } from "./captures.js";
 import { diffsTable } from "./diffs.js";
 import { editsTable } from "./edits.js";
 import { epochsTable } from "./epochs.js";
+import { perfSamplesTable } from "./perf-samples.js";
 import { regionsTable } from "./regions.js";
 import { stateSnapshotsTable } from "./state-snapshots.js";
 import { tapHitsTable, tapsTable } from "./taps.js";
@@ -15,6 +16,7 @@ export {
 	diffsTable,
 	editsTable,
 	epochsTable,
+	perfSamplesTable,
 	regionsTable,
 	stateSnapshotsTable,
 	tapHitsTable,
@@ -29,6 +31,7 @@ export function registerRecorderTables(registry: QueryRegistry): void {
 	registry.register(editsTable);
 	registry.register(stateSnapshotsTable);
 	registry.register(a11yIssuesTable);
+	registry.register(perfSamplesTable);
 	registry.register(tapsTable);
 	registry.register(tapHitsTable);
 }

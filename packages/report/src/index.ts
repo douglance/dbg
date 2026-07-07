@@ -89,6 +89,19 @@ export interface A11yIssueReport {
 	detail: string;
 }
 
+export interface PerfDeltaReport {
+	lcp: { anchor: number | null; after: number | null; delta: number | null };
+	cls: { anchor: number; after: number; delta: number };
+	longtasks: { newCount: number };
+	jsHeap: { anchor: number | null; after: number | null; delta: number | null };
+	bundleBytes: {
+		anchor: number | null;
+		after: number | null;
+		delta: number | null;
+	};
+	interactions: { count: number; maxDuration: number };
+}
+
 export interface ReportPair {
 	name: string;
 	beforePng: Buffer;
@@ -102,6 +115,7 @@ export interface ReportPair {
 	networkDiff?: NetworkDiffReport;
 	stateChanges?: StateChangeReport[];
 	a11yIssues?: A11yIssueReport[];
+	perfDelta?: PerfDeltaReport;
 }
 
 export interface ReportMeta {
@@ -358,6 +372,46 @@ function renderA11yPanel(issues: A11yIssueReport[]): string {
 	return `<section class="panel"><h3>New a11y issues <span class="badge red">${issues.length}</span></h3><ul>${items}</ul></section>`;
 }
 
+function renderPerfPanel(delta?: PerfDeltaReport): string {
+	if (!delta) return "";
+	const fmtMs = (v: number | null): string =>
+		v == null ? "—" : `${Math.round(v)}ms`;
+	const signed = (v: number): string =>
+		`${v >= 0 ? "+" : ""}${v.toLocaleString("en-US")}`;
+	const items: string[] = [];
+	if (delta.lcp.after != null || delta.lcp.anchor != null) {
+		const d = delta.lcp.delta;
+		const trail = d != null ? ` (${d >= 0 ? "+" : ""}${Math.round(d)}ms)` : "";
+		items.push(
+			`<li>ΔLCP <span class="now">${fmtMs(delta.lcp.after)}</span> <span class="was">${fmtMs(delta.lcp.anchor)}</span>${trail}</li>`,
+		);
+	}
+	items.push(
+		`<li>ΔCLS <span class="now">${delta.cls.delta.toFixed(3)}</span></li>`,
+	);
+	if (delta.longtasks.newCount > 0) {
+		items.push(
+			`<li>new longtasks <span class="badge amber">${delta.longtasks.newCount}</span></li>`,
+		);
+	}
+	if (delta.jsHeap.delta != null) {
+		items.push(
+			`<li>ΔJSHeap <span class="now">${signed(delta.jsHeap.delta)} B</span></li>`,
+		);
+	}
+	if (delta.bundleBytes.delta != null) {
+		items.push(
+			`<li>Δbundle_bytes <span class="now">${signed(delta.bundleBytes.delta)} B</span></li>`,
+		);
+	}
+	if (delta.interactions.count > 0) {
+		items.push(
+			`<li>interactions during flows <span class="badge dim">${delta.interactions.count}</span> (max ${Math.round(delta.interactions.maxDuration)}ms)</li>`,
+		);
+	}
+	return `<section class="panel"><h3>Performance</h3><ul>${items.join("")}</ul></section>`;
+}
+
 function renderPair(pair: ReportPair, index: number): string {
 	const before = pngUri(pair.beforePng);
 	const after = pngUri(pair.afterPng);
@@ -417,6 +471,7 @@ function renderPair(pair: ReportPair, index: number): string {
 		${renderNetworkDiffPanel(pair.networkDiff)}
 		${renderStateChangesPanel(pair.stateChanges ?? [])}
 		${renderA11yPanel(pair.a11yIssues ?? [])}
+		${renderPerfPanel(pair.perfDelta)}
 	</div>
 </section>`;
 }

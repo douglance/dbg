@@ -289,6 +289,10 @@ export type Command =
 			noNetwork?: boolean;
 			noState?: boolean;
 			noA11y?: boolean;
+			// Skip the Plan X perf-delta computation.
+			noPerf?: boolean;
+			// Budget spec (e.g. "lcp=2500,cls=0.1"); checked CLI-side.
+			perfBudget?: string;
 	  }
 	// Render the timeline filmstrip HTML from recorded captures.
 	// limit = max most-recent frames embedded (default 100).
@@ -427,6 +431,19 @@ export interface AfterA11yIssue {
 	detail: string;
 }
 
+export interface AfterPerfDelta {
+	lcp: { anchor: number | null; after: number | null; delta: number | null };
+	cls: { anchor: number; after: number; delta: number };
+	longtasks: { newCount: number };
+	jsHeap: { anchor: number | null; after: number | null; delta: number | null };
+	bundleBytes: {
+		anchor: number | null;
+		after: number | null;
+		delta: number | null;
+	};
+	interactions: { count: number; maxDuration: number };
+}
+
 export interface WhyVerdict {
 	error: { text: string; ts: number };
 	edits: Array<{
@@ -502,6 +519,7 @@ export interface OkResponse {
 	networkDiff?: AfterNetworkDiff;
 	stateChanges?: AfterStateChange[];
 	a11yNew?: AfterA11yIssue[];
+	perfDelta?: AfterPerfDelta;
 	why?: WhyVerdict;
 	regions?: AfterRegion[];
 	styleChanges?: AfterStyleChange[];
