@@ -101,6 +101,11 @@ import {
 	diffStorage,
 	type StorageSnapshot,
 } from "./recorder/storage-diff.js";
+import {
+	buildTapCondition,
+	parseTapSentinel,
+	suffixUrlRegex,
+} from "./recorder/taps.js";
 import { isIgnoredWatchPath } from "./recorder/watch.js";
 import {
 	rankCauses,
@@ -127,6 +132,19 @@ registerNativeTables(tableRegistry);
 registerRecorderTables(tableRegistry);
 registerDevTables(tableRegistry);
 tableRegistry.register(timelineTable);
+
+// Route tap-logpoint console sentinels (`__dbg_tap:<id>`) → tap_hits rows and
+// suppress them from the user-visible console/events sinks. Installed once; the
+// single choke upstream of both state.console and the persisted events store.
+CdpClientWrapper.eventInterceptor = (method, eventParams) => {
+	if (method !== "Runtime.consoleAPICalled") return false;
+	const hit = parseTapSentinel(
+		(eventParams as { args?: unknown } | null)?.args,
+	);
+	if (!hit) return false;
+	store.insertTapHit({ tapId: hit.tapId, value: hit.value });
+	return true;
+};
 
 const registry = {
 	sessions: new Map<string, Session>(),
@@ -1824,6 +1842,10 @@ function consoleDeltaSince(
 	for (const entry of session.state.console) {
 		if (entry.ts <= anchorTs) continue;
 		if (entry.type !== "error" && entry.type !== "assert") continue;
+		// Defensive: tap sentinels are already suppressed at the adapter choke
+		// (never reach state.console) and are type 'log' anyway — but never let a
+		// `__dbg_tap:` row leak into the user-facing console delta.
+		if (entry.text.startsWith("__dbg_tap:")) continue;
 		const key = `${entry.type}|${entry.text}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -2404,6 +2426,128 @@ async function handleWhy(substring?: string, cwd?: string): Promise<Response> {
 		windowMs,
 	);
 	return { ok: true, why: verdict, messages: [verdict.answer] };
+}
+
+// ── Plan W: taps (logpoints) ──
+async function handleTapAdd(
+	session: Session,
+	file: string,
+	line: number,
+	expr: string,
+	url?: string,
+): Promise<Response> {
+	if (session.executor.protocol !== "cdp") {
+		return { ok: false, error: "taps require a browser or node (CDP) session" };
+	}
+	const urlRegex = url ?? suffixUrlRegex(file);
+	const cdpLine = Math.max(0, line - 1); // users give 1-based; CDP wants 0-based
+	// Insert first so the sentinel can carry the tap id; roll back on failure.
+	const tapId = store.insertTap({
+		sessionId: session.name,
+		breakpointId: "",
+		file,
+		line,
+		expr,
+		urlRegex,
+	});
+	const condition = buildTapCondition(tapId, expr);
+	try {
+		const result = (await session.executor.send("Debugger.setBreakpointByUrl", {
+			lineNumber: cdpLine,
+			urlRegex,
+			columnNumber: 0,
+			condition,
+		})) as {
+			breakpointId: string;
+			locations: Array<{ scriptId: string; lineNumber: number }>;
+		};
+		store.run("UPDATE taps SET breakpoint_id = ? WHERE id = ?", [
+			result.breakpointId,
+			tapId,
+		]);
+		const loc = result.locations?.[0];
+		const armed = loc
+			? `armed on ${
+					session.state.scripts.get(loc.scriptId)?.url ?? "(loaded script)"
+				}:${loc.lineNumber + 1}`
+			: "arms on script load (no matching script yet)";
+		return {
+			ok: true,
+			id: String(tapId),
+			messages: [`tap ${tapId} ${armed}`, `expr: ${expr}`],
+		};
+	} catch (e) {
+		store.run("DELETE FROM taps WHERE id = ?", [tapId]);
+		return { ok: false, error: `tap add failed: ${(e as Error).message}` };
+	}
+}
+
+function handleTapList(): Response {
+	const rows = store.query(
+		`SELECT id, session_id, file, line, expr, url_regex, enabled, created_ts
+		 FROM taps ORDER BY id`,
+	);
+	return {
+		ok: true,
+		columns: [
+			"id",
+			"session_id",
+			"file",
+			"line",
+			"expr",
+			"url_regex",
+			"enabled",
+			"created_ts",
+		],
+		rows: rows.map((r) => [
+			r.id,
+			r.session_id,
+			r.file,
+			r.line,
+			r.expr,
+			r.url_regex,
+			r.enabled,
+			r.created_ts,
+		]),
+	};
+}
+
+async function handleTapRm(id: number): Promise<Response> {
+	const rows = store.query(
+		"SELECT breakpoint_id, session_id FROM taps WHERE id = ?",
+		[id],
+	);
+	if (rows.length === 0) return { ok: false, error: `tap not found: ${id}` };
+	const breakpointId = String(rows[0].breakpoint_id ?? "");
+	const sessionName = String(rows[0].session_id ?? "");
+	const session = registry.sessions.get(sessionName);
+	if (session && breakpointId) {
+		try {
+			await session.executor.send("Debugger.removeBreakpoint", {
+				breakpointId,
+			});
+		} catch {
+			// breakpoint already gone (session reloaded/closed) — just drop the row
+		}
+	}
+	store.run("DELETE FROM tap_hits WHERE tap_id = ?", [id]);
+	store.run("DELETE FROM taps WHERE id = ?", [id]);
+	return { ok: true, id: String(id), messages: [`tap ${id} removed`] };
+}
+
+function handleTapHits(id: number, tail?: number): Response {
+	const limit = tail && tail > 0 ? tail : 100;
+	const rows = store
+		.query(
+			"SELECT ts, value FROM tap_hits WHERE tap_id = ? ORDER BY id DESC LIMIT ?",
+			[id, limit],
+		)
+		.reverse();
+	return {
+		ok: true,
+		columns: ["ts", "value"],
+		rows: rows.map((r) => [r.ts, r.value]),
+	};
 }
 
 const TIMELINE_DEFAULT_LIMIT = 100;
@@ -3741,6 +3885,12 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleRecordShoot(cmd);
 		case "why":
 			return handleWhy(cmd.substring, cmd.cwd);
+		case "tap.list":
+			return handleTapList();
+		case "tap.hits":
+			return handleTapHits(cmd.id, cmd.tail);
+		case "tap.rm":
+			return handleTapRm(cmd.id);
 	}
 
 	// Session-scoped commands share an optional `session` field.
@@ -3821,6 +3971,8 @@ async function dispatchToSession(
 				cmd.line,
 				cmd.condition,
 			);
+		case "tap.add":
+			return handleTapAdd(session, cmd.file, cmd.line, cmd.expr, cmd.url);
 		case "db":
 			return handleDeleteBreakpoint(session.executor, session.state, cmd.id);
 		case "bl":

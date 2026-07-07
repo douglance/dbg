@@ -43,6 +43,26 @@ dbg bl                               # list all breakpoints
 dbg db <id>                          # delete breakpoint
 ```
 
+### Taps (Logpoints)
+
+A tap is a never-pausing conditioned breakpoint that logs an expression each
+time the line runs — instrument code without editing it or stopping execution.
+Works on browser AND node (V8 inspector) sessions.
+
+```sh
+dbg tap add src/Cart.tsx:42 "user.id"   # log user.id whenever line 42 runs (1-based)
+dbg tap add app.js:3 "doubled" --url "app\\.js"  # --url overrides the file-suffix regex (bundles)
+dbg tap list                            # all taps (id, file, line, expr, url_regex)
+dbg tap hits <id> --tail 20             # the most-recent values this tap captured
+dbg tap rm <id>                         # remove the tap + its CDP breakpoint
+dbg q "SELECT ts, value FROM tap_hits WHERE tap_id = <id>"
+```
+
+`tap add` echoes the RESOLVED location ("armed on <url>:<line>") or "arms on
+script load" when no matching script is loaded yet — never silently pending. The
+`__dbg_tap:` console sentinel is routed to `tap_hits` and suppressed from the
+user-facing console, `after` consoleDelta, `dbg why`, and the timeline.
+
 ### Control Execution
 
 ```sh
@@ -366,6 +386,8 @@ agent history all join on `ts` directly.
 | `edits` | **First-class file-edit stream** — one row per fs-watch event (`ts`, `path`, `epoch_id`, `session_id`), tagged with the current epoch | recorder store |
 | `state_snapshots` | Per-capture local/sessionStorage dump (`capture_id`, `kind`, `data` JSON) | recorder store |
 | `a11y_issues` | Per-capture accessibility issues (`capture_id`, `rule`, `selector`, `detail`) | recorder store |
+| `taps` | Logpoints (`id`, `session_id`, `file`, `line`, `expr`, `url_regex`, `enabled`) | debug store |
+| `tap_hits` | Each tap fire (`tap_id`, `ts`, `value`) | debug store |
 | `commits` | `git log` (hash, short_hash, ts, author, summary, files); default repo = cwd, override `WHERE repo = '/abs'` (500 most recent) | git |
 | `agent_prompts` | Claude Code prompts (`ts`, `display`, `project`); default-scoped to cwd, `WHERE project = '<slug>'` widens | `~/.claude/history.jsonl` |
 | `agent_sessions` | Per-session transcript summaries (`ts_first`, `ts_last`, `title`, `message_count`) | `~/.claude/projects/<slug>` |

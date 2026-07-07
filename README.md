@@ -169,6 +169,25 @@ dbg bl                        # list all
 
 Breakpoints persist across `dbg restart`.
 
+### Taps (logpoints)
+
+A tap is a never-pausing conditioned breakpoint (the DevTools logpoint trick)
+that logs an expression each time a line runs — instrument without editing code
+or stopping. Works on browser and node (V8 inspector) sessions.
+
+```sh
+dbg tap add src/Cart.tsx:42 "user.id"   # 1-based line; echoes "armed on <url>:<line>"
+dbg tap add bundle.js:12 "x" --url "…"  # --url overrides the file-suffix regex
+dbg tap list                            # all taps
+dbg tap hits <id> --tail 20             # recent captured values
+dbg tap rm <id>
+dbg q "SELECT ts, value FROM tap_hits WHERE tap_id = <id>"
+```
+
+The `__dbg_tap:` console sentinel is routed to `tap_hits` and suppressed from the
+user console, `after` consoleDelta, `dbg why`, and the timeline — taps never
+pollute the signals they observe.
+
 ### Inspection
 
 ```sh
@@ -335,6 +354,8 @@ edits, git commits, screenshots, and agent history join directly:
 | `edits` | First-class file-edit stream (one row per fs-watch event during recording) | `id`, `ts`, `path`, `epoch_id`, `session_id` |
 | `state_snapshots` | Per-capture local/sessionStorage dump | `capture_id`, `kind`, `data` |
 | `a11y_issues` | Per-capture accessibility issues | `capture_id`, `rule`, `selector`, `detail` |
+| `taps` | Logpoints (never-pausing conditioned breakpoints) | `id`, `session_id`, `file`, `line`, `expr`, `url_regex` |
+| `tap_hits` | Each tap fire | `tap_id`, `ts`, `value` |
 | `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |
 | `agent_prompts` | Claude Code prompts, cwd-scoped (`WHERE project = '<slug>'` widens) | `ts`, `display`, `project` |
 | `agent_sessions` | Per-session transcript summaries (cached by mtime/size) | `session_id`, `ts_first`, `ts_last`, `title`, `message_count` |

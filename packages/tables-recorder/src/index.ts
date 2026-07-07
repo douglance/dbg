@@ -7,6 +7,7 @@ import { editsTable } from "./edits.js";
 import { epochsTable } from "./epochs.js";
 import { regionsTable } from "./regions.js";
 import { stateSnapshotsTable } from "./state-snapshots.js";
+import { tapHitsTable, tapsTable } from "./taps.js";
 
 export {
 	a11yIssuesTable,
@@ -16,6 +17,8 @@ export {
 	epochsTable,
 	regionsTable,
 	stateSnapshotsTable,
+	tapHitsTable,
+	tapsTable,
 };
 
 export function registerRecorderTables(registry: QueryRegistry): void {
@@ -26,4 +29,6 @@ export function registerRecorderTables(registry: QueryRegistry): void {
 	registry.register(editsTable);
 	registry.register(stateSnapshotsTable);
 	registry.register(a11yIssuesTable);
+	registry.register(tapsTable);
+	registry.register(tapHitsTable);
 }

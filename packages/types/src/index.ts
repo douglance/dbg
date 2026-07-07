@@ -299,6 +299,23 @@ export type Command =
 	// back to ranked causes (edits/epoch/commit/prompt). `cwd` scopes the dev
 	// tables to the user's project (see `q`).
 	| { cmd: "why"; substring?: string; cwd?: string }
+
+	// ─── Taps (logpoints) ───
+	// Arm a never-pausing conditioned breakpoint that logs `expr` each hit.
+	// `line` is 1-based (as typed); `url` overrides the file-suffix urlRegex.
+	| SessionScoped<{
+			cmd: "tap.add";
+			file: string;
+			line: number;
+			expr: string;
+			url?: string;
+	  }>
+	// List all taps.
+	| { cmd: "tap.list" }
+	// Remove a tap by id (also removes its CDP breakpoint).
+	| SessionScoped<{ cmd: "tap.rm"; id: number }>
+	// Show a tap's hits (most-recent `tail`).
+	| { cmd: "tap.hits"; id: number; tail?: number }
 	// One-off deliberate capture: URL, or a component file rendered in an
 	// esbuild harness (#dbg-root). Launches a throwaway Chrome; `states` are
 	// forced via CSS.forcePseudoState and each produces its own PNG.

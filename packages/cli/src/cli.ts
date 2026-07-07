@@ -16,6 +16,7 @@ import { registerLifecycleCommands } from "./commands/lifecycle.js";
 import { registerNativeCommands } from "./commands/native.js";
 import { registerQueryCommand } from "./commands/query.js";
 import { registerRecordCommands } from "./commands/record.js";
+import { registerTapCommands } from "./commands/taps.js";
 
 const cli = Cli.create("dbg", {
 	description:
@@ -32,5 +33,6 @@ registerQueryCommand(cli);
 registerBrowserCommands(cli);
 registerRecordCommands(cli);
 registerNativeCommands(cli);
+registerTapCommands(cli);
 
 cli.serve();
