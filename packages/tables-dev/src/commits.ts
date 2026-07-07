@@ -13,6 +13,8 @@ import { promisify } from "node:util";
 
 import { extractFilterValue, type VirtualTable } from "@dbg/query";
 
+import { scopeCwd } from "./internal.js";
+
 const execFileAsync = promisify(execFile);
 
 const COMMIT_LIMIT = 500;
@@ -24,7 +26,7 @@ export const commitsTable: VirtualTable = {
 	columns: ["hash", "short_hash", "ts", "author", "summary", "files", "repo"],
 	async fetch(where, _executor) {
 		const repoFilter = extractFilterValue(where, "repo");
-		const repo = typeof repoFilter === "string" ? repoFilter : process.cwd();
+		const repo = typeof repoFilter === "string" ? repoFilter : scopeCwd();
 
 		let stdout: string;
 		try {

@@ -14,9 +14,16 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
-const KNOWN_TABLES = ["events", "captures", "epochs", "diffs", "regions"];
+const KNOWN_TABLES = [
+	"events",
+	"captures",
+	"epochs",
+	"diffs",
+	"regions",
+	"edits",
+];
 
 export interface EventRecord {
 	ts?: number;
@@ -62,6 +69,13 @@ export interface DiffRecord {
 	reportPath: string;
 }
 
+export interface EditRecord {
+	ts?: number;
+	path: string;
+	epochId?: number | null;
+	sessionId: string;
+}
+
 export interface RegionRecord {
 	diffId: number;
 	x: number;
@@ -89,6 +103,7 @@ export class EventStore {
 	private insertEpochStmt!: StatementSync;
 	private insertDiffStmt!: StatementSync;
 	private insertRegionStmt!: StatementSync;
+	private insertEditStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -224,6 +239,23 @@ export class EventStore {
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_regions_diff_id ON regions(diff_id)",
 		);
+
+		// File edits: one row per fs-watch event during recording (the raw
+		// edit stream). Retention/TTL pruning never touches this table — these
+		// are cheap metadata rows kept for blame/timeline joins.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS edits (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				path TEXT NOT NULL,
+				epoch_id INTEGER,
+				session_id TEXT NOT NULL
+			)
+		`);
+		this.db.exec("CREATE INDEX IF NOT EXISTS idx_edits_ts ON edits(ts)");
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_edits_session_id ON edits(session_id)",
+		);
 	}
 
 	private prepareStatements(): void {
@@ -244,6 +276,9 @@ export class EventStore {
 		this.insertRegionStmt = this.db.prepare(
 			`INSERT INTO regions (diff_id, x, y, w, h, component, file, causal)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		this.insertEditStmt = this.db.prepare(
+			"INSERT INTO edits (ts, path, epoch_id, session_id) VALUES (?, ?, ?, ?)",
 		);
 	}
 
@@ -354,6 +389,18 @@ export class EventStore {
 			epoch.sessionId,
 			epoch.name ?? null,
 			epoch.auto ? 1 : 0,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a file-edit row; returns its id (-1 if the store is closed). */
+	insertEdit(edit: EditRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertEditStmt.run(
+			edit.ts ?? Date.now(),
+			edit.path,
+			edit.epochId ?? null,
+			edit.sessionId,
 		);
 		return Number(result.lastInsertRowid);
 	}

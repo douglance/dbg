@@ -14,7 +14,7 @@ export function registerQueryCommand(cli: Cli.Cli): void {
 			session: z.string().optional().describe("Target session by name"),
 		}),
 		async run({ args, options }) {
-			const cmd: Command = { cmd: "q", sql: args.sql };
+			const cmd: Command = { cmd: "q", sql: args.sql, cwd: process.cwd() };
 			if (options.session) cmd.session = options.session;
 			return await sendCommand(cmd);
 		},

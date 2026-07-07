@@ -7,6 +7,8 @@ import {
 	sessionScanStats,
 } from "./agent-sessions.js";
 import { commitsTable } from "./commits.js";
+import { setScopeCwd } from "./internal.js";
+import { timelineTable } from "./timeline.js";
 
 export {
 	agentPromptsTable,
@@ -14,6 +16,8 @@ export {
 	commitsTable,
 	resetSessionCache,
 	sessionScanStats,
+	setScopeCwd,
+	timelineTable,
 };
 
 export function registerDevTables(registry: QueryRegistry): void {

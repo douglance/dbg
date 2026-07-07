@@ -107,6 +107,9 @@ importers:
       '@dbg/tables-core':
         specifier: workspace:*
         version: link:../tables-core
+      '@dbg/tables-dev':
+        specifier: workspace:*
+        version: link:../tables-dev
       '@dbg/tables-native':
         specifier: workspace:*
         version: link:../tables-native

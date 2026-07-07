@@ -268,7 +268,7 @@ dbg open 9222 --target <id>            # connect to specific tab
 | `events` | Raw event log (daemon, CDP, connections) |
 | `cdp` / `cdp_messages` | CDP messages with direction and latency |
 | `connections` | Connection lifecycle (connect, disconnect, reconnect) |
-| `timeline` | Unified cross-stream incident timeline (compact by default) |
+| `events_stream` | CDP event-stream debug view (stream/phase/severity classification, windowing, coalescing) |
 
 Event log queries:
 
@@ -276,12 +276,16 @@ Event log queries:
 dbg q "SELECT direction, method, latency_ms FROM cdp ORDER BY id DESC LIMIT 20"
 dbg q "SELECT method, latency_ms FROM cdp WHERE latency_ms > 100"
 dbg q "SELECT ts, event, session_id FROM connections"
-dbg q "SELECT ts, stream, severity, method, entity, summary FROM timeline ORDER BY ts DESC LIMIT 120"
-dbg q "SELECT ts, stream, severity, method, summary FROM timeline WHERE include = 'errors' ORDER BY ts DESC LIMIT 80"
-dbg q "SELECT ts, stream, method, summary FROM timeline WHERE detail = 'full' AND window_ms = 5000 ORDER BY ts DESC LIMIT 200"
+dbg q "SELECT ts, stream, severity, method, entity, summary FROM events_stream ORDER BY ts DESC LIMIT 120"
+dbg q "SELECT ts, stream, severity, method, summary FROM events_stream WHERE include = 'errors' ORDER BY ts DESC LIMIT 80"
+dbg q "SELECT ts, stream, method, summary FROM events_stream WHERE detail = 'full' AND window_ms = 5000 ORDER BY ts DESC LIMIT 200"
 ```
 
-Event-backed tables (`events`, `cdp`, `connections`, `timeline`) can be queried even when no debug session is active.
+> Note: the `timeline` name now refers to the unified cross-source stream (see
+> **Unified Timeline** below). The CDP event-stream view was renamed to
+> `events_stream`; its schema and behavior are unchanged.
+
+Event-backed tables (`events`, `cdp`, `connections`, `events_stream`, `timeline`) can be queried even when no debug session is active.
 
 #### Native Tables (LLDB/DAP Sessions)
 
@@ -322,6 +326,71 @@ dbg q "SELECT name, value FROM styles WHERE node_id = 42"
 dbg q "SELECT name, value FROM cookies WHERE domain LIKE '%example%'"
 dbg q "SELECT key, value FROM storage WHERE type = 'local'"
 ```
+
+## Recorder & Dev Tables
+
+Every development signal is stored on one **epoch-milliseconds** timeline (UTC
+`ts` INTEGER across every table), so screenshots, file edits, git commits, and
+agent history all join on `ts` directly.
+
+| Table | Description | Source |
+|---|---|---|
+| `captures` | Screenshot capture metadata (url, hash, epoch_id, tier) | recorder store |
+| `epochs` | Epoch markers (auto on edit bursts, or named via `dbg mark`) | recorder store |
+| `diffs` | `dbg after` pixel-diff results | recorder store |
+| `regions` | Blamed diff clusters (`diff_id`) | recorder store |
+| `edits` | **First-class file-edit stream** — one row per fs-watch event (`ts`, `path`, `epoch_id`, `session_id`), tagged with the current epoch | recorder store |
+| `commits` | `git log` (hash, short_hash, ts, author, summary, files); default repo = cwd, override `WHERE repo = '/abs'` (500 most recent) | git |
+| `agent_prompts` | Claude Code prompts (`ts`, `display`, `project`); default-scoped to cwd, `WHERE project = '<slug>'` widens | `~/.claude/history.jsonl` |
+| `agent_sessions` | Per-session transcript summaries (`ts_first`, `ts_last`, `title`, `message_count`) | `~/.claude/projects/<slug>` |
+| `timeline` | **Unified union** over all of the above | union |
+
+`dbg q` threads your shell's cwd to the daemon, so `commits` / `agent_prompts` /
+`agent_sessions` scope to *your* project, not the daemon's.
+
+### Unified Timeline
+
+`timeline` is a single ts-ordered union (columns: `ts`, `kind`, `session_id`,
+`label`, `ref_id`, `detail`). `kind` ∈ `capture` (label=url) · `mark`/`epoch` ·
+`edit` (label=path) · `error` / `exception` (label=text) · `commit`
+(label=summary, ref_id=short_hash) · `prompt` (label=first 120 chars) · `diff`.
+It defaults to the **last 24h** unless a `WHERE` constrains `ts`.
+
+Multi-table joins, `BETWEEN`, `GROUP BY`, and aliases now run as **real SQL**:
+queries that reference more than one table (or that the single-table engine
+can't parse) are materialized into an in-memory SQLite DB and executed there.
+
+```sh
+# 1. Causal chain — which prompt caused the edit that produced an error
+dbg q "SELECT p.display, e.path, c.url, x.label
+       FROM agent_prompts p
+       JOIN edits e ON e.ts BETWEEN p.ts AND p.ts + 600000
+       JOIN captures c ON c.ts BETWEEN e.ts AND e.ts + 30000
+       JOIN timeline x ON x.kind = 'error' AND x.ts BETWEEN e.ts AND e.ts + 5000
+       ORDER BY e.ts"
+
+# 2. Errors within 5s of each edit
+dbg q "SELECT e.path, e.ts, t.label
+       FROM edits e
+       JOIN timeline t ON t.kind = 'error' AND t.ts BETWEEN e.ts AND e.ts + 5000
+       ORDER BY e.ts"
+
+# 3. Commits with no subsequent capture (shipped but never re-recorded)
+dbg q "SELECT c.short_hash, c.summary
+       FROM commits c
+       WHERE (SELECT COUNT(*) FROM captures cap WHERE cap.ts > c.ts) = 0"
+```
+
+**Cold-scan costs:** `commits` shells out to `git log` (~50–150ms). `agent_prompts`
+reads one JSONL file (~100ms cold). `agent_sessions` scans a project's transcript
+dir — ~0.7s cold on a large history, ~50ms warm (results are cached by
+path+mtime+size). `edits` / `captures` / `epochs` / `diffs` are indexed store
+reads (sub-ms). `dbg timeline` HTML now interleaves commit + prompt chips between
+frame cards by `ts`.
+
+> Network failures are **not** yet in `timeline`: CDP Network timestamps are
+> monotonic-clock seconds, not epoch-ms, so they'd break the unified `ts`
+> contract (query the `network` table directly meanwhile).
 
 ## Output Format
 

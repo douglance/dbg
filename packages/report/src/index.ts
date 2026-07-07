@@ -85,8 +85,25 @@ export interface TimelineFrame {
 	id?: string | number;
 }
 
+/** A git commit rendered as a chip interleaved into the timeline strip. */
+export interface TimelineCommit {
+	ts: number;
+	shortHash: string;
+	summary: string;
+}
+
+/** An agent prompt rendered as a chip interleaved into the timeline strip. */
+export interface TimelinePrompt {
+	ts: number;
+	text: string;
+}
+
 export interface TimelineInput {
 	frames: TimelineFrame[];
+	/** Commit chips positioned between frame cards by ts. */
+	commits?: TimelineCommit[];
+	/** Prompt chips positioned between frame cards by ts. */
+	prompts?: TimelinePrompt[];
 	/** totalFrames: full capture count when the strip is truncated to the
 	 * most recent N — the header then reads "showing last N of M". */
 	meta?: { generatedAt?: string; totalFrames?: number };
@@ -332,6 +349,13 @@ const TIMELINE_CSS = `${SHARED_CSS}
 .instruct p{font-size:12px;color:#aeb8c9;margin:6px 0}
 .instruct .fname{color:#dbe9ff}
 .frame .placeholder{width:100%;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;border:1px dashed #3a4458;background:#0a0d12;border-radius:4px;color:#8b95a7;font-size:11px;text-align:center;padding:8px}
+.marker{flex:0 0 auto;width:150px;align-self:stretch;display:flex;flex-direction:column;justify-content:center;gap:6px;border-radius:8px;padding:10px;font-size:12px}
+.marker .marker-kind{font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.marker .marker-text{color:#c4cddb;overflow:hidden;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical}
+.marker.commit{background:#12241a;border:1px solid #1f5133}
+.marker.commit .marker-kind{color:#4ade80}
+.marker.prompt{background:#1a1424;border:1px solid #4a2f6a}
+.marker.prompt .marker-kind{color:#c084fc}
 `;
 
 const TIMELINE_JS = `
@@ -410,9 +434,40 @@ function renderFrame(frame: TimelineFrame, index: number): string {
 </figure>`;
 }
 
+function renderCommitChip(commit: TimelineCommit): string {
+	const iso = new Date(commit.ts).toISOString();
+	return `<div class="marker commit" data-ts="${commit.ts}" title="${esc(commit.summary)}">
+	<div class="marker-kind">commit ${esc(commit.shortHash)}</div>
+	<div class="marker-text">${esc(commit.summary)}</div>
+	<div class="time">${esc(iso)}</div>
+</div>`;
+}
+
+function renderPromptChip(prompt: TimelinePrompt): string {
+	const iso = new Date(prompt.ts).toISOString();
+	return `<div class="marker prompt" data-ts="${prompt.ts}" title="${esc(prompt.text)}">
+	<div class="marker-kind">prompt</div>
+	<div class="marker-text">${esc(prompt.text)}</div>
+	<div class="time">${esc(iso)}</div>
+</div>`;
+}
+
 /** Render a self-contained timeline filmstrip HTML page (all assets inlined). */
 export function renderTimeline(input: TimelineInput): string {
-	const frames = input.frames.map((f, i) => renderFrame(f, i)).join("\n");
+	// Merge frames and commit/prompt markers into one ts-ordered strip. Frames
+	// keep their original 0-based index for the "frame N (capture:ID)" label.
+	const entries: Array<{ ts: number; order: number; html: string }> = [];
+	input.frames.forEach((f, i) =>
+		entries.push({ ts: f.ts, order: 0, html: renderFrame(f, i) }),
+	);
+	for (const commit of input.commits ?? []) {
+		entries.push({ ts: commit.ts, order: 1, html: renderCommitChip(commit) });
+	}
+	for (const prompt of input.prompts ?? []) {
+		entries.push({ ts: prompt.ts, order: 1, html: renderPromptChip(prompt) });
+	}
+	entries.sort((a, b) => a.ts - b.ts || a.order - b.order);
+	const frames = entries.map((e) => e.html).join("\n");
 	const generated = input.meta?.generatedAt
 		? ` · generated ${esc(input.meta.generatedAt)}`
 		: "";

@@ -33,8 +33,13 @@ interface EventRecord {
 
 const MAX_SCAN_ROWS = 1500;
 
+// Event-stream debug view over the raw `events` table (stream/phase/entity/
+// severity classification, windowing, coalescing). Registered as
+// `events_stream`: Plan U reclaims the `timeline` name for the unified,
+// cross-source union table (@dbg/tables-dev). This view is unchanged and
+// remains queryable as `events_stream`.
 export const timelineTable: VirtualTable = {
-	name: "timeline",
+	name: "events_stream",
 	columns: [
 		"id",
 		"ts",

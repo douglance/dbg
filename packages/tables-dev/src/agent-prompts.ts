@@ -22,6 +22,7 @@ import type { VirtualTable } from "@dbg/query";
 import {
 	claudeDir,
 	projectSlug,
+	scopeCwd,
 	toEpochMs,
 	whereReferencesColumn,
 } from "./internal.js";
@@ -38,7 +39,7 @@ export const agentPromptsTable: VirtualTable = {
 		}
 
 		const scoped = !whereReferencesColumn(where, "project");
-		const currentSlug = projectSlug(process.cwd());
+		const currentSlug = projectSlug(scopeCwd());
 
 		const rows: unknown[][] = [];
 		for (const line of content.split("\n")) {

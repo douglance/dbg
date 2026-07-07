@@ -22,6 +22,7 @@ import { extractFilterValue, type VirtualTable } from "@dbg/query";
 import {
 	claudeDir,
 	projectSlug,
+	scopeCwd,
 	toEpochMs,
 	whereReferencesColumn,
 } from "./internal.js";
@@ -183,7 +184,7 @@ export const agentSessionsTable: VirtualTable = {
 				slugs = [];
 			}
 		} else {
-			slugs = [projectSlug(process.cwd())];
+			slugs = [projectSlug(scopeCwd())];
 		}
 
 		const rows: unknown[][] = [];

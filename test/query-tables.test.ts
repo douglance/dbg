@@ -1251,7 +1251,7 @@ describe("query tables", () => {
 			"storage",
 			"ws_frames",
 			"coverage",
-			"timeline",
+			"events_stream",
 			"heap_profiler",
 			"cpu_profiler",
 			"memory",

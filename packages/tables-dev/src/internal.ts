@@ -12,6 +12,23 @@ export function claudeDir(): string {
 	return process.env.DBG_CLAUDE_DIR || join(homedir(), ".claude");
 }
 
+// Per-query cwd override. The dev tables default project/repo scoping to the
+// process cwd, but when the daemon serves a `dbg q` it must scope to the
+// CLIENT's cwd (threaded through the `q` payload), not the daemon's. The
+// daemon sets this around each query and clears it afterwards. Queries are
+// dispatched sequentially per daemon, so a single override slot is safe.
+let scopeCwdOverride: string | null = null;
+
+export function setScopeCwd(cwd: string | null): void {
+	scopeCwdOverride = cwd;
+}
+
+/** Effective cwd for project/repo scoping: the override if set, else the
+ * process cwd. */
+export function scopeCwd(): string {
+	return scopeCwdOverride ?? process.cwd();
+}
+
 // Claude Code project-slug convention: the absolute project path with
 // every '/' and '.' replaced by '-'.
 // e.g. /Users/doug/Developer/lv/dbg -> -Users-doug-Developer-lv-dbg

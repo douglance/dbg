@@ -233,7 +233,10 @@ emulated for deterministic pixels. For Storybook, shoot the story iframe URL
 directly.
 
 Recorder data is queryable like everything else: `captures`, `epochs`, `diffs`,
-and `regions` tables (e.g. `dbg q "SELECT ts, changed_files, epoch_id FROM captures"`).
+`regions`, and the first-class `edits` file-edit stream (e.g. `dbg q "SELECT ts,
+changed_files, epoch_id FROM captures"`). Every edit, commit, screenshot, and
+agent prompt shares one epoch-ms `ts`, so they all join on the unified
+`timeline` table — see **Unified Timeline & Dev Tables** below.
 
 **Retention.** History is metadata (cheap, kept forever); pixels decay
 (expensive, bounded). PNGs and DOM snapshots are stored content-addressed under
@@ -299,6 +302,53 @@ WHERE supports: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `AND`, `OR`, parenthese
 | `connections` | Connection lifecycle events | `id`, `ts`, `event`, `session_id`, `data` |
 
 Tables marked with required filters (`props`, `proto`, `source`, `listeners`) will tell you what they need.
+
+The former CDP event-stream `timeline` view is now `events_stream` (schema
+unchanged: `stream`, `phase`, `severity`, `entity`, `summary`, plus the
+`detail`/`include`/`window_ms` pushdown filters). The `timeline` name now belongs
+to the unified cross-source union below.
+
+##### Unified Timeline & Dev Tables
+
+Every development signal lives on one epoch-milliseconds `ts` axis, so file
+edits, git commits, screenshots, and agent history join directly:
+
+| Table | Description | Key Columns |
+|---|---|---|
+| `edits` | First-class file-edit stream (one row per fs-watch event during recording) | `id`, `ts`, `path`, `epoch_id`, `session_id` |
+| `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |
+| `agent_prompts` | Claude Code prompts, cwd-scoped (`WHERE project = '<slug>'` widens) | `ts`, `display`, `project` |
+| `agent_sessions` | Per-session transcript summaries (cached by mtime/size) | `session_id`, `ts_first`, `ts_last`, `title`, `message_count` |
+| `timeline` | Union over captures/epochs/edits/console-errors/exceptions/commits/prompts/diffs | `ts`, `kind`, `session_id`, `label`, `ref_id`, `detail` |
+
+`timeline` defaults to the last 24h (unless a `WHERE` constrains `ts`); `kind` is
+`capture`/`mark`/`epoch`/`edit`/`error`/`exception`/`commit`/`prompt`/`diff`.
+`dbg q` threads your shell cwd so the dev tables scope to your project.
+
+Queries that reference more than one table (or use `JOIN`/`BETWEEN`/`GROUP
+BY`/aliases the single-table engine can't parse) are materialized into an
+in-memory SQLite DB and run as **real SQL**:
+
+```sh
+# Which prompt → edit → error chain (one SELECT across four sources)
+dbg q "SELECT p.display, e.path, x.label
+       FROM agent_prompts p
+       JOIN edits e ON e.ts BETWEEN p.ts AND p.ts + 600000
+       JOIN timeline x ON x.kind = 'error' AND x.ts BETWEEN e.ts AND e.ts + 5000
+       ORDER BY e.ts"
+
+# Errors within 5s of each edit
+dbg q "SELECT e.path, t.label FROM edits e
+       JOIN timeline t ON t.kind = 'error' AND t.ts BETWEEN e.ts AND e.ts + 5000"
+
+# Commits with no subsequent capture
+dbg q "SELECT c.short_hash, c.summary FROM commits c
+       WHERE (SELECT COUNT(*) FROM captures cap WHERE cap.ts > c.ts) = 0"
+```
+
+Cold-scan costs: `commits` ~50–150ms (git), `agent_prompts` ~100ms (one JSONL),
+`agent_sessions` ~0.7s cold / ~50ms warm (cached), store tables sub-ms. Network
+failures are excluded from `timeline` (CDP Network ts is monotonic, not epoch-ms).
 
 #### Object Drill-Down
 

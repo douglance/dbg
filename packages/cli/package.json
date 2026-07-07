@@ -25,6 +25,7 @@
 		"@dbg/store": "workspace:*",
 		"@dbg/tables-browser": "workspace:*",
 		"@dbg/tables-core": "workspace:*",
+		"@dbg/tables-dev": "workspace:*",
 		"@dbg/tables-native": "workspace:*",
 		"@dbg/tables-recorder": "workspace:*",
 		"@dbg/types": "workspace:*",

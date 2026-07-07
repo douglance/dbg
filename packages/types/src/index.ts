@@ -213,8 +213,10 @@ export type Command =
 	// ─── Query ───
 	// Run a SQL query against the table registry for this session.
 	// JSON rendering (\j) is a CLI-side formatting concern and is not
-	// carried in the payload.
-	| SessionScoped<{ cmd: "q"; sql: string }>
+	// carried in the payload. `cwd` is the CLIENT's working directory,
+	// threaded so dev tables (commits/agent_prompts/agent_sessions) scope to
+	// the user's project rather than the daemon's cwd.
+	| SessionScoped<{ cmd: "q"; sql: string; cwd?: string }>
 
 	// ─── Sessions ───
 	// Global: list all sessions. No `session` field (operates on the registry).

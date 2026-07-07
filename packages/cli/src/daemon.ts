@@ -29,6 +29,13 @@ import { EventStore } from "@dbg/store";
 import { registerBrowserTables } from "@dbg/tables-browser";
 import { registerCoreTables } from "@dbg/tables-core";
 import { registerNativeTables } from "@dbg/tables-native";
+import {
+	agentPromptsTable,
+	commitsTable,
+	registerDevTables,
+	setScopeCwd,
+	timelineTable,
+} from "@dbg/tables-dev";
 import { registerRecorderTables } from "@dbg/tables-recorder";
 import type {
 	AttachDiagnostics,
@@ -102,6 +109,8 @@ registerCoreTables(tableRegistry);
 registerBrowserTables(tableRegistry);
 registerNativeTables(tableRegistry);
 registerRecorderTables(tableRegistry);
+registerDevTables(tableRegistry);
+tableRegistry.register(timelineTable);
 
 const registry = {
 	sessions: new Map<string, Session>(),
@@ -241,6 +250,9 @@ const RECORDER_SESSION = "recorder";
 const MUTATION_BINDING = "__dbg_mutation__";
 const MUTATION_DEBOUNCE_MS = 300;
 const DEFAULT_IDLE_THRESHOLD_MS = 10000;
+// Per-path debounce for the `edits` row stream: identical paths firing within
+// this window collapse to one row (editors emit several events per save).
+const EDIT_DEBOUNCE_MS = 50;
 
 // Injected via Page.addScriptToEvaluateOnNewDocument before the first
 // navigation: installs a debounced MutationObserver on documentElement that
@@ -288,6 +300,9 @@ interface RecorderState {
 	// Latest epoch (auto or named); new capture rows carry this id.
 	currentEpochId: number | null;
 	lastFsEventTs: number;
+	// Per-path timestamp of the last inserted `edits` row; identical paths
+	// firing within EDIT_DEBOUNCE_MS collapse to a single row.
+	lastEditTs: Map<string, number>;
 	watcher: fs.FSWatcher | null;
 	// Serializes trigger-driven captures so screenshots never interleave.
 	captureChain: Promise<void>;
@@ -1380,6 +1395,7 @@ async function handleRecordStart(
 			pendingHmrModules: new Set(),
 			currentEpochId: null,
 			lastFsEventTs: Date.now(),
+			lastEditTs: new Map(),
 			watcher: null,
 			captureChain: Promise.resolve(),
 			retention: {
@@ -1436,6 +1452,18 @@ async function handleRecordStart(
 					}
 					r.lastFsEventTs = now;
 					r.pendingChangedFiles.add(filename);
+					// First-class edit stream: one row per fs event, tagged with
+					// the current epoch. Debounce identical paths within a short
+					// window (editors fire multiple events per save).
+					if (now - (r.lastEditTs.get(filename) ?? 0) >= EDIT_DEBOUNCE_MS) {
+						r.lastEditTs.set(filename, now);
+						store.insertEdit({
+							ts: now,
+							path: filename,
+							epochId: r.currentEpochId,
+							sessionId: r.sessionName,
+						});
+					}
 				},
 			);
 		} catch {
@@ -1996,6 +2024,10 @@ async function handleRecordAfter(
 }
 
 const TIMELINE_DEFAULT_LIMIT = 100;
+// Commit/prompt chips are interleaved into the timeline strip when their ts
+// falls within the frame window, widened by this margin on each side so a
+// commit or prompt just before/after the recording still shows.
+const TIMELINE_CHIP_MARGIN_MS = 5 * 60 * 1000;
 
 async function handleRecordTimeline(
 	open?: boolean,
@@ -2073,6 +2105,45 @@ async function handleRecordTimeline(
 			frames[index].logCounts = { error: count };
 		}
 	}
+	// Commit + prompt chips: gather git commits and agent prompts whose ts
+	// falls within the frame window (+/- a small margin) and interleave them
+	// into the strip. Commits/prompts read git + ~/.claude via the dev tables,
+	// scoped to the daemon's cwd (the recorded project).
+	const commits: Array<{ ts: number; shortHash: string; summary: string }> = [];
+	const prompts: Array<{ ts: number; text: string }> = [];
+	if (frames.length > 0) {
+		const winMin = frames[0].ts - TIMELINE_CHIP_MARGIN_MS;
+		const winMax = frames[frames.length - 1].ts + TIMELINE_CHIP_MARGIN_MS;
+		const qExec =
+			session?.executor ?? new CdpClientWrapper(createState(), store);
+		try {
+			const c = await commitsTable.fetch(null, qExec);
+			for (const row of c.rows) {
+				const ts = Number(row[2]);
+				if (ts >= winMin && ts <= winMax) {
+					commits.push({
+						ts,
+						shortHash: String(row[1] ?? ""),
+						summary: String(row[4] ?? ""),
+					});
+				}
+			}
+		} catch {
+			// git unavailable — render without commit chips
+		}
+		try {
+			const p = await agentPromptsTable.fetch(null, qExec);
+			for (const row of p.rows) {
+				const ts = Number(row[0]);
+				if (ts >= winMin && ts <= winMax) {
+					prompts.push({ ts, text: String(row[1] ?? "").slice(0, 60) });
+				}
+			}
+		} catch {
+			// no agent history — render without prompt chips
+		}
+	}
+
 	const root = recordingsRootDir();
 	fs.mkdirSync(root, { recursive: true });
 	const timelinePath = path.join(root, "timeline.html");
@@ -2080,6 +2151,8 @@ async function handleRecordTimeline(
 		timelinePath,
 		renderTimeline({
 			frames,
+			commits,
+			prompts,
 			meta: { generatedAt: new Date().toISOString(), totalFrames },
 		}),
 	);
@@ -3171,7 +3244,11 @@ async function handleCoverage(
 async function handleQuery(
 	queryStr: string,
 	session: Session | null,
+	cwd?: string,
 ): Promise<Response> {
+	// Scope dev tables (commits/agent_prompts/agent_sessions/timeline) to the
+	// CLIENT's cwd for the duration of this query, then restore.
+	setScopeCwd(cwd ?? null);
 	try {
 		let executor: DebugExecutor;
 		if (session) {
@@ -3190,6 +3267,8 @@ async function handleQuery(
 		return { ok: true, columns: result.columns, rows: result.rows };
 	} catch (e) {
 		return { ok: false, error: (e as Error).message };
+	} finally {
+		setScopeCwd(null);
 	}
 }
 
@@ -3302,7 +3381,7 @@ async function dispatch(cmd: Command): Promise<Response> {
 				if (sessionName && !registry.sessions.has(sessionName)) {
 					return { ok: false, error: `unknown session: ${sessionName}` };
 				}
-				return handleQuery(cmd.sql, resolveSession(sessionName));
+				return handleQuery(cmd.sql, resolveSession(sessionName), cmd.cwd);
 			}
 
 			const session = resolveSession(sessionName);
@@ -3379,7 +3458,7 @@ async function dispatchToSession(
 				session.targetType === "native" ? undefined : session.targetType,
 			);
 		case "q":
-			return handleQuery(cmd.sql, session);
+			return handleQuery(cmd.sql, session, cmd.cwd);
 		case "navigate":
 			if (!session.executor.capabilities.page) {
 				return { ok: false, error: "requires browser session" };
