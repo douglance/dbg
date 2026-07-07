@@ -29,6 +29,11 @@ try {
 const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-triggers-"));
 const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "dbg-triggers-db-"));
 const EVENTS_DB_PATH = path.join(dbDir, "events.db");
+// Own Chrome profile: vitest parallelizes test files, and the default shared
+// profile's SingletonLock rejects a second concurrent Chrome.
+const chromeProfileDir = fs.mkdtempSync(
+	path.join(os.tmpdir(), "dbg-triggers-profile-"),
+);
 
 function dbg(...args: string[]): {
 	stdout: string;
@@ -44,6 +49,7 @@ function dbg(...args: string[]): {
 				...process.env,
 				DBG_SOCK: SOCKET_PATH,
 				DBG_EVENTS_DB: EVENTS_DB_PATH,
+				DBG_CHROME_PROFILE: chromeProfileDir,
 			},
 		});
 		return { stdout, stderr: "", exitCode: 0 };
@@ -137,6 +143,7 @@ describe.runIf(hasChrome)("recorder triggers + annotations", () => {
 		await sleep(200);
 		fs.rmSync(workDir, { recursive: true, force: true });
 		fs.rmSync(dbDir, { recursive: true, force: true });
+		fs.rmSync(chromeProfileDir, { recursive: true, force: true });
 	});
 
 	it(

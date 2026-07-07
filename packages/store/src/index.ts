@@ -10,6 +10,14 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 	DatabaseSync: new (path?: string) => DatabaseSyncType;
 };
 
+// Bump whenever any table shape changes. The events DB is scratch/debug data:
+// on a version mismatch (or an unreadable schema) the known tables are dropped
+// and rebuilt rather than migrated — a dbg upgrade must never crash on an
+// existing DB.
+export const SCHEMA_VERSION = 2;
+
+const KNOWN_TABLES = ["events", "captures", "epochs", "diffs", "regions"];
+
 export interface EventRecord {
 	ts?: number;
 	source: string;
@@ -30,6 +38,7 @@ export interface CaptureRecord {
 	changedFiles?: string[];
 	hmrModules?: string[];
 	epochId?: number | null;
+	snapshotPath?: string | null;
 }
 
 export interface EpochRecord {
@@ -49,6 +58,17 @@ export interface DiffRecord {
 	reportPath: string;
 }
 
+export interface RegionRecord {
+	diffId: number;
+	x: number;
+	y: number;
+	w: number;
+	h: number;
+	component?: string | null;
+	file?: string | null;
+	causal?: boolean;
+}
+
 interface PendingEvent {
 	ts: number;
 	source: string;
@@ -60,10 +80,11 @@ interface PendingEvent {
 
 export class EventStore {
 	private db: DatabaseSyncType;
-	private insertStmt: StatementSync;
-	private insertCaptureStmt: StatementSync;
-	private insertEpochStmt: StatementSync;
-	private insertDiffStmt: StatementSync;
+	private insertStmt!: StatementSync;
+	private insertCaptureStmt!: StatementSync;
+	private insertEpochStmt!: StatementSync;
+	private insertDiffStmt!: StatementSync;
+	private insertRegionStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -72,7 +93,49 @@ export class EventStore {
 		this.db = new DatabaseSync(dbPath);
 		this.db.exec("PRAGMA journal_mode = WAL");
 		this.db.exec("PRAGMA synchronous = NORMAL");
-		this.db.exec("PRAGMA user_version = 1");
+
+		// Schema guard: on version mismatch, rebuild from scratch.
+		if (this.readUserVersion() !== SCHEMA_VERSION) {
+			this.dropKnownTables();
+		}
+		this.createTables();
+		try {
+			this.prepareStatements();
+		} catch {
+			// Same version but a mismatched shape (hand-edited or corrupted DB):
+			// rebuild once, then let a genuine failure propagate.
+			this.dropKnownTables();
+			this.createTables();
+			this.prepareStatements();
+		}
+		this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+
+		this.flushTimer = setInterval(() => {
+			this.flush();
+		}, 100);
+		if (this.flushTimer.unref) this.flushTimer.unref();
+	}
+
+	private readUserVersion(): number {
+		try {
+			const row = this.db.prepare("PRAGMA user_version").get();
+			return Number(row?.user_version ?? 0);
+		} catch {
+			return -1;
+		}
+	}
+
+	private dropKnownTables(): void {
+		for (const table of KNOWN_TABLES) {
+			try {
+				this.db.exec(`DROP TABLE IF EXISTS ${table}`);
+			} catch {
+				// a table we cannot even drop will surface on CREATE below
+			}
+		}
+	}
+
+	private createTables(): void {
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS events (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,7 +159,7 @@ export class EventStore {
 		);
 
 		// Visual flight recorder: screenshot capture metadata + epoch markers.
-		// PNGs live on disk; only metadata is stored here.
+		// PNGs and gzipped DOM/style snapshots live on disk; only metadata here.
 		this.db.exec(`
 			CREATE TABLE IF NOT EXISTS captures (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,7 +172,8 @@ export class EventStore {
 				png_path TEXT NOT NULL,
 				changed_files TEXT NOT NULL DEFAULT '[]',
 				hmr_modules TEXT NOT NULL DEFAULT '[]',
-				epoch_id INTEGER
+				epoch_id INTEGER,
+				snapshot_path TEXT
 			)
 		`);
 		this.db.exec("CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts)");
@@ -139,13 +203,31 @@ export class EventStore {
 			)
 		`);
 		this.db.exec("CREATE INDEX IF NOT EXISTS idx_diffs_ts ON diffs(ts)");
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS regions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				diff_id INTEGER NOT NULL,
+				x REAL NOT NULL,
+				y REAL NOT NULL,
+				w REAL NOT NULL,
+				h REAL NOT NULL,
+				component TEXT,
+				file TEXT,
+				causal INTEGER NOT NULL DEFAULT 0
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_regions_diff_id ON regions(diff_id)",
+		);
+	}
 
+	private prepareStatements(): void {
 		this.insertStmt = this.db.prepare(
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",
 		);
 		this.insertCaptureStmt = this.db.prepare(
-			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		this.insertEpochStmt = this.db.prepare(
 			"INSERT INTO epochs (ts, session_id, name, auto) VALUES (?, ?, ?, ?)",
@@ -154,11 +236,10 @@ export class EventStore {
 			`INSERT INTO diffs (ts, name, baseline_capture_id, after_capture_id, diff_percent, diff_pixels, report_path)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		);
-
-		this.flushTimer = setInterval(() => {
-			this.flush();
-		}, 100);
-		if (this.flushTimer.unref) this.flushTimer.unref();
+		this.insertRegionStmt = this.db.prepare(
+			`INSERT INTO regions (diff_id, x, y, w, h, component, file, causal)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
 	}
 
 	record(event: EventRecord, flushNow = false): void {
@@ -219,6 +300,7 @@ export class EventStore {
 			JSON.stringify(capture.changedFiles ?? []),
 			JSON.stringify(capture.hmrModules ?? []),
 			capture.epochId ?? null,
+			capture.snapshotPath ?? null,
 		);
 		return Number(result.lastInsertRowid);
 	}
@@ -236,6 +318,26 @@ export class EventStore {
 			diff.reportPath,
 		);
 		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert blame regions for a diff; returns inserted row ids. */
+	insertRegions(regions: RegionRecord[]): number[] {
+		if (this.closed) return [];
+		const ids: number[] = [];
+		for (const region of regions) {
+			const result = this.insertRegionStmt.run(
+				region.diffId,
+				region.x,
+				region.y,
+				region.w,
+				region.h,
+				region.component ?? null,
+				region.file ?? null,
+				region.causal ? 1 : 0,
+			);
+			ids.push(Number(result.lastInsertRowid));
+		}
+		return ids;
 	}
 
 	/** Insert an epoch marker row; returns its id (-1 if the store is closed). */

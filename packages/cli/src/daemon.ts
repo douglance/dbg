@@ -1179,7 +1179,13 @@ async function handleRecordStart(
 
 	let chrome: LaunchedChrome;
 	try {
-		chrome = await launchChrome();
+		// $DBG_CHROME_PROFILE isolates concurrent recorders (used by tests to
+		// avoid SingletonLock collisions on the shared default profile).
+		chrome = await launchChrome(
+			process.env.DBG_CHROME_PROFILE
+				? { profileDir: process.env.DBG_CHROME_PROFILE }
+				: {},
+		);
 	} catch (e) {
 		return { ok: false, error: (e as Error).message };
 	}
