@@ -89,12 +89,11 @@ function isDaemonRunning(socketPath: string): Promise<boolean> {
 async function ensureDaemon(paths: DaemonPaths): Promise<void> {
 	if (await isDaemonRunning(paths.socketPath)) return;
 
-	// Clean up stale socket file
-	try {
-		fs.unlinkSync(paths.socketPath);
-	} catch {
-		// doesn't exist
-	}
+	// NOTE: the client deliberately never unlinks the socket file. Concurrent
+	// CLI invocations race this spawn path, and deleting the file here could
+	// erase a socket a daemon just bound. Stale-socket recovery is the
+	// daemon's job (bind-or-defer with a health probe in startServer); a
+	// daemon forked against a live socket simply defers and exits.
 
 	const thisFile = fileURLToPath(import.meta.url);
 	const thisDir = dirname(thisFile);

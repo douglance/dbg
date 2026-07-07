@@ -3310,12 +3310,15 @@ async function dispatchToSession(
 // ─── Socket server ───
 
 function startServer(): void {
-	// Clean up stale socket
-	try {
-		fs.unlinkSync(SOCKET_PATH);
-	} catch {
-		// doesn't exist, fine
-	}
+	// Atomic bind-or-defer. Concurrent CLI invocations can race the daemon
+	// auto-spawn and fork several daemons at once; the old unlink-then-listen
+	// here let every newcomer DELETE a healthy daemon's socket and usurp it,
+	// orphaning the previous daemon with all its session state (split-brain).
+	// Now: bind without unlinking. On EADDRINUSE, probe the existing socket —
+	// a live daemon answers, so this process defers and exits; only a dead
+	// (stale) socket file is unlinked, and takeover is retried exactly once.
+	let boundSocket = false;
+	let attemptedStaleTakeover = false;
 
 	const server = net.createServer((socket) => {
 		let buffer = "";
@@ -3338,17 +3341,57 @@ function startServer(): void {
 		});
 	});
 
-	server.listen(SOCKET_PATH, () => {
-		// Write PID to stdout so the CLI knows we launched
-		process.stdout.write(`${process.pid}\n`);
-		// Detach stdout/stderr after writing PID
-		if (process.stdout.unref) process.stdout.unref();
-	});
+	const deferToExistingDaemon = () => {
+		// Another daemon owns the socket. Flush our scratch events and bow out.
+		store.close();
+		process.exit(0);
+	};
 
-	server.on("error", (err) => {
+	const tryListen = () => {
+		server.listen(SOCKET_PATH, () => {
+			boundSocket = true;
+			// Write PID to stdout so the CLI knows we launched
+			process.stdout.write(`${process.pid}\n`);
+			// Detach stdout/stderr after writing PID
+			if (process.stdout.unref) process.stdout.unref();
+		});
+	};
+
+	server.on("error", (err: NodeJS.ErrnoException) => {
+		if (err.code === "EADDRINUSE") {
+			const probe = net.createConnection(SOCKET_PATH);
+			probe.on("connect", () => {
+				probe.destroy();
+				deferToExistingDaemon();
+			});
+			probe.on("error", () => {
+				probe.destroy();
+				if (attemptedStaleTakeover) {
+					// Lost the takeover race to a sibling that is now binding;
+					// treat it as the live daemon and defer.
+					deferToExistingDaemon();
+					return;
+				}
+				attemptedStaleTakeover = true;
+				try {
+					fs.unlinkSync(SOCKET_PATH);
+				} catch {
+					// already gone
+				}
+				tryListen();
+			});
+			probe.setTimeout(1000, () => {
+				// Busy-but-alive daemon: defer rather than usurp.
+				probe.destroy();
+				deferToExistingDaemon();
+			});
+			return;
+		}
 		process.stderr.write(`daemon server error: ${err.message}\n`);
 		process.exit(1);
 	});
+
+	tryListen();
 
 	// Cleanup on exit
 	function cleanup() {
@@ -3361,10 +3404,14 @@ function startServer(): void {
 			},
 			true,
 		);
-		try {
-			fs.unlinkSync(SOCKET_PATH);
-		} catch {
-			// ignore
+		// Only the daemon that actually bound the socket may remove the file —
+		// a deferring loser must never delete the winner's socket.
+		if (boundSocket) {
+			try {
+				fs.unlinkSync(SOCKET_PATH);
+			} catch {
+				// ignore
+			}
 		}
 		if (recorder) {
 			recorder.watcher?.close();
