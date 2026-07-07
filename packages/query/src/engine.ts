@@ -40,6 +40,10 @@ export async function executeQuery(
 	const result = await table.fetch(query.where, executor);
 	let rows = filterRows(result.columns, result.rows, query.where);
 
+	if (query.count) {
+		return { columns: ["count"], rows: [[rows.length]], format };
+	}
+
 	if (query.orderBy) {
 		rows = orderRows(result.columns, rows, query.orderBy);
 	}

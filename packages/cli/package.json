@@ -17,12 +17,14 @@
 	"dependencies": {
 		"@dbg/adapter-cdp": "workspace:*",
 		"@dbg/adapter-dap": "workspace:*",
+		"@dbg/launcher": "workspace:*",
 		"@dbg/provider-apple-device": "workspace:*",
 		"@dbg/query": "workspace:*",
 		"@dbg/store": "workspace:*",
 		"@dbg/tables-browser": "workspace:*",
 		"@dbg/tables-core": "workspace:*",
 		"@dbg/tables-native": "workspace:*",
+		"@dbg/tables-recorder": "workspace:*",
 		"@dbg/types": "workspace:*",
 		"incur": "^0.4.3"
 	},

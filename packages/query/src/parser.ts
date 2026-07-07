@@ -6,6 +6,8 @@ export interface Query {
 	where: WhereExpr | null;
 	orderBy: { column: string; direction: "ASC" | "DESC" } | null;
 	limit: number | null;
+	/** Present (true) for SELECT COUNT(*) queries. */
+	count?: true;
 }
 
 export type WhereExpr =
@@ -161,13 +163,39 @@ class Parser {
 
 	parse(): Query {
 		this.expectKeyword("SELECT");
-		const columns = this.parseColumns();
+		const count = this.parseOptionalCountStar();
+		const columns = count ? "*" : this.parseColumns();
 		this.expectKeyword("FROM");
 		const table = this.expectIdent();
 		const where = this.parseOptionalWhere();
 		const orderBy = this.parseOptionalOrderBy();
 		const limit = this.parseOptionalLimit();
-		return { columns, table, where, orderBy, limit };
+		const query: Query = { columns, table, where, orderBy, limit };
+		if (count) query.count = true;
+		return query;
+	}
+
+	// Matches COUNT(*) (case-insensitive) as the whole select list.
+	private parseOptionalCountStar(): boolean {
+		const t = this.peek();
+		if (
+			t?.type !== "ident" ||
+			t.value.toUpperCase() !== "COUNT" ||
+			this.tokens[this.pos + 1]?.type !== "lparen"
+		) {
+			return false;
+		}
+		this.advance(); // COUNT
+		this.advance(); // (
+		const star = this.advance();
+		if (!star || star.type !== "star") {
+			throw new Error("Expected '*' in COUNT(*)");
+		}
+		const closing = this.advance();
+		if (!closing || closing.type !== "rparen") {
+			throw new Error("Expected ')' after COUNT(*");
+		}
+		return true;
 	}
 
 	private peek(): Token | undefined {

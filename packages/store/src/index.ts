@@ -19,6 +19,26 @@ export interface EventRecord {
 	sessionId?: string | null;
 }
 
+export interface CaptureRecord {
+	ts?: number;
+	sessionId: string;
+	url: string;
+	scrollY?: number;
+	dpr?: number;
+	hash: string;
+	pngPath: string;
+	changedFiles?: string[];
+	hmrModules?: string[];
+	epochId?: number | null;
+}
+
+export interface EpochRecord {
+	ts?: number;
+	sessionId: string;
+	name?: string | null;
+	auto?: boolean;
+}
+
 interface PendingEvent {
 	ts: number;
 	source: string;
@@ -31,6 +51,8 @@ interface PendingEvent {
 export class EventStore {
 	private db: DatabaseSyncType;
 	private insertStmt: StatementSync;
+	private insertCaptureStmt: StatementSync;
+	private insertEpochStmt: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -62,8 +84,47 @@ export class EventStore {
 			"CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id)",
 		);
 
+		// Visual flight recorder: screenshot capture metadata + epoch markers.
+		// PNGs live on disk; only metadata is stored here.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS captures (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				session_id TEXT NOT NULL,
+				url TEXT NOT NULL,
+				scroll_y REAL NOT NULL DEFAULT 0,
+				dpr REAL NOT NULL DEFAULT 1,
+				hash TEXT NOT NULL,
+				png_path TEXT NOT NULL,
+				changed_files TEXT NOT NULL DEFAULT '[]',
+				hmr_modules TEXT NOT NULL DEFAULT '[]',
+				epoch_id INTEGER
+			)
+		`);
+		this.db.exec("CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts)");
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_captures_session_id ON captures(session_id)",
+		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS epochs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				session_id TEXT NOT NULL,
+				name TEXT,
+				auto INTEGER NOT NULL DEFAULT 0
+			)
+		`);
+		this.db.exec("CREATE INDEX IF NOT EXISTS idx_epochs_ts ON epochs(ts)");
+
 		this.insertStmt = this.db.prepare(
 			"INSERT INTO events (ts, source, category, method, data, session_id) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		this.insertCaptureStmt = this.db.prepare(
+			`INSERT INTO captures (ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		);
+		this.insertEpochStmt = this.db.prepare(
+			"INSERT INTO epochs (ts, session_id, name, auto) VALUES (?, ?, ?, ?)",
 		);
 
 		this.flushTimer = setInterval(() => {
@@ -114,6 +175,36 @@ export class EventStore {
 			}
 			this.pending = [...batch, ...this.pending];
 		}
+	}
+
+	/** Insert a recorder capture row; returns its id (-1 if the store is closed). */
+	insertCapture(capture: CaptureRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertCaptureStmt.run(
+			capture.ts ?? Date.now(),
+			capture.sessionId,
+			capture.url,
+			capture.scrollY ?? 0,
+			capture.dpr ?? 1,
+			capture.hash,
+			capture.pngPath,
+			JSON.stringify(capture.changedFiles ?? []),
+			JSON.stringify(capture.hmrModules ?? []),
+			capture.epochId ?? null,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert an epoch marker row; returns its id (-1 if the store is closed). */
+	insertEpoch(epoch: EpochRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertEpochStmt.run(
+			epoch.ts ?? Date.now(),
+			epoch.sessionId,
+			epoch.name ?? null,
+			epoch.auto ? 1 : 0,
+		);
+		return Number(result.lastInsertRowid);
 	}
 
 	query(sql: string, params: unknown[] = []): Record<string, unknown>[] {

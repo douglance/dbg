@@ -251,6 +251,19 @@ export type Command =
 	// Start/stop JS + CSS coverage tracking.
 	| SessionScoped<{ cmd: "coverage"; action: CoverageAction }>
 
+	// ─── Recording (visual flight recorder; global — one recorder per daemon) ───
+	// Launch managed headless Chrome, attach as a named session, capture an
+	// initial frame, and keep recording until record.stop.
+	| {
+			cmd: "record.start";
+			urls: string[];
+			viewport?: { width: number; height: number };
+	  }
+	// Stop recording: detach, kill the managed Chrome, clear recorder state.
+	| { cmd: "record.stop" }
+	// Recorder state snapshot: {running, pid, port, urls, frameCount}.
+	| { cmd: "record.status" }
+
 	// ─── Target/device enumeration (global) ───
 	// List debuggable targets at a port. No `session`: discovery endpoint.
 	| { cmd: "targets"; port: number; host?: string }
@@ -269,6 +282,15 @@ export type Command =
 	| SessionScoped<{ cmd: "memory"; address: string; length: number }>
 	// Disassemble around `address`, or the current frame when omitted.
 	| SessionScoped<{ cmd: "disasm"; address?: string }>;
+
+export interface RecordingStatus {
+	running: boolean;
+	pid?: number;
+	port?: number;
+	urls?: string[];
+	frameCount?: number;
+	session?: string;
+}
 
 export interface OkResponse {
 	ok: true;
@@ -289,6 +311,7 @@ export interface OkResponse {
 	data?: string;
 	s?: string;
 	sessions?: SessionInfo[];
+	recording?: RecordingStatus;
 	lastErrorCode?: string;
 	lastErrorMessage?: string;
 	lastStopReason?: string;

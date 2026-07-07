@@ -71,6 +71,9 @@ importers:
       '@dbg/adapter-dap':
         specifier: workspace:*
         version: link:../adapter-dap
+      '@dbg/launcher':
+        specifier: workspace:*
+        version: link:../launcher
       '@dbg/provider-apple-device':
         specifier: workspace:*
         version: link:../provider-apple-device
@@ -89,12 +92,17 @@ importers:
       '@dbg/tables-native':
         specifier: workspace:*
         version: link:../tables-native
+      '@dbg/tables-recorder':
+        specifier: workspace:*
+        version: link:../tables-recorder
       '@dbg/types':
         specifier: workspace:*
         version: link:../types
       incur:
         specifier: ^0.4.3
         version: 0.4.3
+
+  packages/launcher: {}
 
   packages/npm:
     dependencies:
@@ -139,6 +147,15 @@ importers:
         version: link:../types
 
   packages/tables-native:
+    dependencies:
+      '@dbg/query':
+        specifier: workspace:*
+        version: link:../query
+      '@dbg/types':
+        specifier: workspace:*
+        version: link:../types
+
+  packages/tables-recorder:
     dependencies:
       '@dbg/query':
         specifier: workspace:*

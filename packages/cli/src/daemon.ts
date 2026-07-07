@@ -2,14 +2,17 @@
 // and dispatches to CDP command handlers
 // Supports multiple concurrent CDP sessions via a session registry
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
+import * as path from "node:path";
 import {
 	CdpClientWrapper,
 	discoverTarget,
 	listTargets,
 } from "@dbg/adapter-cdp";
 import { DapClientWrapper } from "@dbg/adapter-dap";
+import { type LaunchedChrome, launchChrome } from "@dbg/launcher";
 import {
 	ATTACH_PLATFORMS,
 	AppleDeviceProviderError,
@@ -23,6 +26,7 @@ import { EventStore } from "@dbg/store";
 import { registerBrowserTables } from "@dbg/tables-browser";
 import { registerCoreTables } from "@dbg/tables-core";
 import { registerNativeTables } from "@dbg/tables-native";
+import { registerRecorderTables } from "@dbg/tables-recorder";
 import type {
 	AttachDiagnostics,
 	AttachPlatform,
@@ -69,6 +73,7 @@ const tableRegistry = new TableRegistry();
 registerCoreTables(tableRegistry);
 registerBrowserTables(tableRegistry);
 registerNativeTables(tableRegistry);
+registerRecorderTables(tableRegistry);
 
 const registry = {
 	sessions: new Map<string, Session>(),
@@ -195,6 +200,28 @@ function isSimulatorAttachResolution(
 	);
 }
 
+// ─── Recorder state (visual flight recorder) ───
+//
+// Recording state lives in the daemon: one recorder per daemon, attached as
+// the named session RECORDER_SESSION. Phase 2 (triggers/annotations) hangs
+// off this object.
+
+const RECORDER_SESSION = "recorder";
+
+interface RecorderState {
+	chrome: LaunchedChrome;
+	sessionName: string;
+	urls: string[];
+	recordingDir: string;
+}
+
+let recorder: RecorderState | null = null;
+
+// Chrome that has been launched but not yet promoted into `recorder`
+// (record.start is still attaching/navigating). Tracked so daemon cleanup
+// never orphans it.
+let pendingChrome: LaunchedChrome | null = null;
+
 // ─── Lifecycle commands ───
 
 interface OpenPayload {
@@ -296,6 +323,13 @@ async function handleClose(session: Session): Promise<Response> {
 	if (session.managedChild) {
 		killTarget(session.managedChild);
 		session.managedChild = null;
+	}
+
+	// Closing the recorder session directly must not orphan managed Chrome.
+	if (recorder && session.name === recorder.sessionName) {
+		const chrome = recorder.chrome;
+		recorder = null;
+		await chrome.kill();
 	}
 
 	const prevPid = session.state.pid;
@@ -881,6 +915,282 @@ async function handleRestart(session: Session): Promise<Response> {
 	} catch (e) {
 		return { ok: false, error: `restart failed: ${(e as Error).message}` };
 	}
+}
+
+// ─── Recording commands ───
+
+async function waitForPageLoad(
+	cdp: CdpClientWrapper,
+	timeoutMs: number,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		try {
+			const result = (await cdp.send("Runtime.evaluate", {
+				expression: "document.readyState",
+				returnByValue: true,
+			})) as { result?: { value?: unknown } };
+			if (result.result?.value === "complete") return;
+		} catch {
+			// evaluate can fail mid-navigation — keep polling
+		}
+		await new Promise((r) => setTimeout(r, 100));
+	}
+	// Best-effort: capture whatever is rendered after the timeout.
+}
+
+async function captureRecorderFrame(
+	session: Session,
+	recordingDir: string,
+): Promise<{ id: number; pngPath: string; hash: string }> {
+	const cdp = asCdpExecutor(session);
+	if (!cdp) throw new Error("recorder session is not a cdp session");
+
+	const shot = (await cdp.send("Page.captureScreenshot", {
+		format: "png",
+	})) as { data: string };
+	const buffer = Buffer.from(shot.data, "base64");
+	const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 16);
+	const ts = Date.now();
+
+	fs.mkdirSync(recordingDir, { recursive: true });
+	const pngPath = path.join(recordingDir, `${ts}-${hash}.png`);
+	fs.writeFileSync(pngPath, buffer);
+
+	let url = session.targetUrl ?? "";
+	let scrollY = 0;
+	let dpr = 1;
+	try {
+		const result = (await cdp.send("Runtime.evaluate", {
+			expression:
+				"JSON.stringify({url: location.href, scrollY: window.scrollY, dpr: window.devicePixelRatio})",
+			returnByValue: true,
+		})) as { result?: { value?: string } };
+		if (result.result?.value) {
+			const metrics = JSON.parse(result.result.value) as {
+				url: string;
+				scrollY: number;
+				dpr: number;
+			};
+			url = metrics.url;
+			scrollY = metrics.scrollY;
+			dpr = metrics.dpr;
+		}
+	} catch {
+		// metadata is best-effort; the frame itself is what matters
+	}
+
+	const id = store.insertCapture({
+		ts,
+		sessionId: session.name,
+		url,
+		scrollY,
+		dpr,
+		hash,
+		pngPath,
+	});
+	return { id, pngPath, hash };
+}
+
+function recorderFrameCount(sessionName: string): number {
+	const rows = store.query(
+		"SELECT COUNT(*) AS c FROM captures WHERE session_id = ?",
+		[sessionName],
+	);
+	return Number(rows[0]?.c ?? 0);
+}
+
+async function handleRecordStart(
+	urls: string[],
+	viewport?: { width: number; height: number },
+): Promise<Response> {
+	if (recorder) {
+		return {
+			ok: false,
+			error: "recording already running; stop it first (dbg record --stop)",
+		};
+	}
+	if (urls.length === 0 || !urls[0]) {
+		return { ok: false, error: "usage: record <url>" };
+	}
+	if (registry.sessions.has(RECORDER_SESSION)) {
+		return {
+			ok: false,
+			error: `session "${RECORDER_SESSION}" already exists; close it first`,
+		};
+	}
+
+	let chrome: LaunchedChrome;
+	try {
+		chrome = await launchChrome();
+	} catch (e) {
+		return { ok: false, error: (e as Error).message };
+	}
+	pendingChrome = chrome;
+
+	try {
+		const state = createState();
+		const cdp = new CdpClientWrapper(state, store);
+		// The page target can lag DevToolsActivePort by a moment — retry briefly.
+		const discoveryDeadline = Date.now() + 5000;
+		let discovered: Awaited<ReturnType<typeof discoverTarget>>;
+		for (;;) {
+			try {
+				discovered = await discoverTarget(chrome.port, "127.0.0.1", "page");
+				break;
+			} catch (e) {
+				if (Date.now() >= discoveryDeadline) throw e;
+				await new Promise((r) => setTimeout(r, 200));
+			}
+		}
+		await cdp.connect(discovered.wsUrl, "page");
+		if (state.cdp) {
+			state.cdp.lastWsUrl = discovered.wsUrl;
+		}
+
+		const session: Session = {
+			name: RECORDER_SESSION,
+			state,
+			executor: cdp,
+			managedChild: null,
+			targetType: "page",
+			port: chrome.port,
+			host: "127.0.0.1",
+			targetUrl: urls[0],
+		};
+		registry.sessions.set(RECORDER_SESSION, session);
+		registry.current = RECORDER_SESSION;
+
+		if (viewport) {
+			await cdp.send("Emulation.setDeviceMetricsOverride", {
+				width: viewport.width,
+				height: viewport.height,
+				deviceScaleFactor: 1,
+				mobile: false,
+			});
+		}
+
+		const nav = (await cdp.send("Page.navigate", { url: urls[0] })) as {
+			errorText?: string;
+		};
+		if (nav.errorText) {
+			throw new Error(`navigation failed: ${nav.errorText}`);
+		}
+		await waitForPageLoad(cdp, 10000);
+
+		const recordingDir = path.join(
+			process.cwd(),
+			".dbg",
+			"recordings",
+			RECORDER_SESSION,
+		);
+		recorder = {
+			chrome,
+			sessionName: RECORDER_SESSION,
+			urls,
+			recordingDir,
+		};
+		pendingChrome = null;
+
+		const frame = await captureRecorderFrame(session, recordingDir);
+
+		store.record(
+			{
+				source: "daemon",
+				category: "recording",
+				method: "record.start",
+				data: { urls, pid: chrome.pid, port: chrome.port },
+				sessionId: RECORDER_SESSION,
+			},
+			true,
+		);
+
+		return {
+			ok: true,
+			s: RECORDER_SESSION,
+			pid: chrome.pid,
+			messages: [
+				`recording ${urls[0]} (chrome pid ${chrome.pid}, port ${chrome.port})`,
+				`frame ${frame.id} saved to ${frame.pngPath}`,
+			],
+			recording: {
+				running: true,
+				pid: chrome.pid,
+				port: chrome.port,
+				urls,
+				frameCount: recorderFrameCount(RECORDER_SESSION),
+				session: RECORDER_SESSION,
+			},
+		};
+	} catch (e) {
+		recorder = null;
+		pendingChrome = null;
+		const stale = registry.sessions.get(RECORDER_SESSION);
+		if (stale) {
+			await handleClose(stale);
+		}
+		await chrome.kill();
+		return { ok: false, error: (e as Error).message };
+	}
+}
+
+async function handleRecordStop(): Promise<Response> {
+	if (!recorder) {
+		return {
+			ok: true,
+			messages: ["no recording in progress"],
+			recording: { running: false },
+		};
+	}
+
+	const { chrome, sessionName } = recorder;
+	recorder = null;
+
+	const session = registry.sessions.get(sessionName);
+	if (session) {
+		await handleClose(session);
+	}
+	await chrome.kill();
+
+	store.record(
+		{
+			source: "daemon",
+			category: "recording",
+			method: "record.stop",
+			data: { pid: chrome.pid },
+			sessionId: sessionName,
+		},
+		true,
+	);
+
+	return {
+		ok: true,
+		messages: [`recording stopped (chrome pid ${chrome.pid} killed)`],
+		recording: { running: false },
+	};
+}
+
+async function handleRecordStatus(): Promise<Response> {
+	if (!recorder) {
+		return {
+			ok: true,
+			recording: {
+				running: false,
+				frameCount: recorderFrameCount(RECORDER_SESSION),
+			},
+		};
+	}
+	return {
+		ok: true,
+		recording: {
+			running: true,
+			pid: recorder.chrome.pid,
+			port: recorder.chrome.port,
+			urls: recorder.urls,
+			frameCount: recorderFrameCount(recorder.sessionName),
+			session: recorder.sessionName,
+		},
+	};
 }
 
 // ─── Target listing ───
@@ -1698,6 +2008,12 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleUse(cmd.name);
 		case "targets":
 			return handleTargets(cmd.port, cmd.host);
+		case "record.start":
+			return handleRecordStart(cmd.urls, cmd.viewport);
+		case "record.stop":
+			return handleRecordStop();
+		case "record.status":
+			return handleRecordStatus();
 	}
 
 	// Session-scoped commands share an optional `session` field.
@@ -1936,6 +2252,15 @@ function startServer(): void {
 			fs.unlinkSync(SOCKET_PATH);
 		} catch {
 			// ignore
+		}
+		if (recorder) {
+			// cleanup() is synchronous; kick off SIGTERM→SIGKILL without awaiting.
+			void recorder.chrome.kill();
+			recorder = null;
+		}
+		if (pendingChrome) {
+			void pendingChrome.kill();
+			pendingChrome = null;
 		}
 		for (const session of registry.sessions.values()) {
 			if (session.managedChild) {
