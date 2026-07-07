@@ -211,7 +211,12 @@ export class EventStore {
 		if (this.closed) return [];
 		this.flush();
 		const stmt = this.db.prepare(sql);
-		return stmt.all(...params) as Record<string, unknown>[];
+		// Cast: @types/node's node:sqlite typings restrict params to
+		// SQLInputValue, which is not exported by every version in range.
+		const all = stmt.all.bind(stmt) as (
+			...args: unknown[]
+		) => Record<string, unknown>[];
+		return all(...params);
 	}
 
 	close(): void {

@@ -258,11 +258,15 @@ export type Command =
 			cmd: "record.start";
 			urls: string[];
 			viewport?: { width: number; height: number };
+			// FS quiet period (ms) that starts a new auto epoch; default 10000.
+			idleThresholdMs?: number;
 	  }
 	// Stop recording: detach, kill the managed Chrome, clear recorder state.
 	| { cmd: "record.stop" }
 	// Recorder state snapshot: {running, pid, port, urls, frameCount}.
 	| { cmd: "record.status" }
+	// Stamp a named epoch (auto=0) in the recording timeline.
+	| { cmd: "record.mark"; name?: string }
 
 	// ─── Target/device enumeration (global) ───
 	// List debuggable targets at a port. No `session`: discovery endpoint.
@@ -290,6 +294,9 @@ export interface RecordingStatus {
 	urls?: string[];
 	frameCount?: number;
 	session?: string;
+	lastCaptureTs?: number | null;
+	captureCount?: number;
+	epochCount?: number;
 }
 
 export interface OkResponse {

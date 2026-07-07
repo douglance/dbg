@@ -9,6 +9,8 @@
       "@dbg/query": ["packages/query/src/index.ts"],
       "@dbg/adapter-cdp": ["packages/adapter-cdp/src/index.ts"],
       "@dbg/adapter-dap": ["packages/adapter-dap/src/index.ts"],
+      "@dbg/diff": ["packages/diff/src/index.ts"],
+      "@dbg/report": ["packages/report/src/index.ts"],
       "@dbg/launcher": ["packages/launcher/src/index.ts"],
       "@dbg/provider-apple-device": [
         "packages/provider-apple-device/src/index.ts"

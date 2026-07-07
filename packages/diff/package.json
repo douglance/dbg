@@ -1,0 +1,24 @@
+{
+	"name": "@dbg/diff",
+	"version": "0.3.0",
+	"private": true,
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"dependencies": {
+		"pixelmatch": "^7.1.0",
+		"pngjs": "^7.0.0"
+	},
+	"devDependencies": {
+		"@types/pngjs": "^6.0.5"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.json"
+	}
+}

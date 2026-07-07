@@ -24,6 +24,8 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.13.1",
+    "@types/pngjs": "^6.0.5",
+    "pngjs": "^7.0.0",
     "@vscode/debugprotocol": "^1.68.0",
     "devtools-protocol": "^0.0.1581282",
     "esbuild": "^0.25.0",

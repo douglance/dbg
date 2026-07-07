@@ -37,6 +37,14 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 				.string()
 				.optional()
 				.describe("Viewport as WxH (e.g. 1280x720)"),
+			idle: z.coerce
+				.number()
+				.int()
+				.positive()
+				.optional()
+				.describe(
+					"FS quiet period in ms that starts a new auto epoch (default 10000)",
+				),
 		}),
 		async run({ args, options }) {
 			if (options.stop) {
@@ -51,6 +59,24 @@ export function registerRecordCommands(cli: Cli.Cli): void {
 			const cmd: Command = { cmd: "record.start", urls: [args.url] };
 			if (options.viewport) {
 				cmd.viewport = parseViewport(options.viewport);
+			}
+			if (options.idle !== undefined) {
+				cmd.idleThresholdMs = options.idle;
+			}
+			return await sendCommand(cmd);
+		},
+	});
+
+	cli.command("mark", {
+		description:
+			"Stamp a named epoch in the recording timeline (auto-epochs from edit bursts exist regardless)",
+		args: z.object({
+			name: z.string().optional().describe("Epoch name (e.g. checkpoint)"),
+		}),
+		async run({ args }) {
+			const cmd: Command = { cmd: "record.mark" };
+			if (args.name) {
+				cmd.name = args.name;
 			}
 			return await sendCommand(cmd);
 		},

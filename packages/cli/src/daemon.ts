@@ -59,6 +59,8 @@ import {
 	handleTrace,
 } from "./commands.js";
 import { killTarget, spawnTarget } from "./process.js";
+import { parseHmrModules } from "./recorder/hmr.js";
+import { isIgnoredWatchPath } from "./recorder/watch.js";
 
 import type { ChildProcess } from "node:child_process";
 
@@ -208,11 +210,61 @@ function isSimulatorAttachResolution(
 
 const RECORDER_SESSION = "recorder";
 
+// Phase 2 trigger constants: in-page MutationObserver debounce and the
+// Runtime binding it calls; FS quiet period that opens a new auto epoch.
+const MUTATION_BINDING = "__dbg_mutation__";
+const MUTATION_DEBOUNCE_MS = 300;
+const DEFAULT_IDLE_THRESHOLD_MS = 10000;
+
+// Injected via Page.addScriptToEvaluateOnNewDocument before the first
+// navigation: installs a debounced MutationObserver on documentElement that
+// pings the daemon through the registered binding once the DOM settles.
+const MUTATION_OBSERVER_SOURCE = `(() => {
+	if (window.__dbg_recorder_observer__) return;
+	window.__dbg_recorder_observer__ = true;
+	let timer = null;
+	const fire = () => {
+		timer = null;
+		try { window.${MUTATION_BINDING}("mutated"); } catch (_e) {}
+	};
+	const install = () => {
+		if (!document.documentElement) { setTimeout(install, 50); return; }
+		new MutationObserver(() => {
+			if (timer !== null) clearTimeout(timer);
+			timer = setTimeout(fire, ${MUTATION_DEBOUNCE_MS});
+		}).observe(document.documentElement, {
+			subtree: true,
+			childList: true,
+			attributes: true,
+			characterData: true,
+		});
+	};
+	install();
+})();`;
+
 interface RecorderState {
 	chrome: LaunchedChrome;
 	sessionName: string;
 	urls: string[];
 	recordingDir: string;
+	// ── Phase 2: trigger + annotation state ──
+	// FS quiet period (ms) after which the next FS event opens an auto epoch.
+	idleThresholdMs: number;
+	// devicePixelRatio, evaluated once per navigation (not per capture).
+	dpr: number;
+	// Hash of the last inserted capture — identical screenshots are skipped.
+	lastHash: string | null;
+	lastCaptureTs: number | null;
+	// Saved files / HMR modules accumulated since the last inserted capture;
+	// written to the NEXT capture row, then cleared.
+	pendingChangedFiles: Set<string>;
+	pendingHmrModules: Set<string>;
+	// Latest epoch (auto or named); new capture rows carry this id.
+	currentEpochId: number | null;
+	lastFsEventTs: number;
+	watcher: fs.FSWatcher | null;
+	// Serializes trigger-driven captures so screenshots never interleave.
+	captureChain: Promise<void>;
 }
 
 let recorder: RecorderState | null = null;
@@ -939,10 +991,13 @@ async function waitForPageLoad(
 	// Best-effort: capture whatever is rendered after the timeout.
 }
 
+/** Capture a screenshot and insert a captures row. Returns null when the
+ * screenshot is pixel-identical to the previous capture (hash dedupe) — in
+ * that case pending annotations stay queued for the next distinct capture. */
 async function captureRecorderFrame(
 	session: Session,
 	recordingDir: string,
-): Promise<{ id: number; pngPath: string; hash: string }> {
+): Promise<{ id: number; pngPath: string; hash: string } | null> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) throw new Error("recorder session is not a cdp session");
 
@@ -951,30 +1006,29 @@ async function captureRecorderFrame(
 	})) as { data: string };
 	const buffer = Buffer.from(shot.data, "base64");
 	const hash = createHash("sha256").update(buffer).digest("hex").slice(0, 16);
-	const ts = Date.now();
 
+	if (recorder && recorder.lastHash === hash) return null;
+
+	const ts = Date.now();
 	fs.mkdirSync(recordingDir, { recursive: true });
 	const pngPath = path.join(recordingDir, `${ts}-${hash}.png`);
 	fs.writeFileSync(pngPath, buffer);
 
 	let url = session.targetUrl ?? "";
 	let scrollY = 0;
-	let dpr = 1;
 	try {
 		const result = (await cdp.send("Runtime.evaluate", {
 			expression:
-				"JSON.stringify({url: location.href, scrollY: window.scrollY, dpr: window.devicePixelRatio})",
+				"JSON.stringify({url: location.href, scrollY: window.scrollY})",
 			returnByValue: true,
 		})) as { result?: { value?: string } };
 		if (result.result?.value) {
 			const metrics = JSON.parse(result.result.value) as {
 				url: string;
 				scrollY: number;
-				dpr: number;
 			};
 			url = metrics.url;
 			scrollY = metrics.scrollY;
-			dpr = metrics.dpr;
 		}
 	} catch {
 		// metadata is best-effort; the frame itself is what matters
@@ -985,11 +1039,68 @@ async function captureRecorderFrame(
 		sessionId: session.name,
 		url,
 		scrollY,
-		dpr,
+		// dpr is evaluated once per navigation and cached on the recorder.
+		dpr: recorder?.dpr ?? 1,
 		hash,
 		pngPath,
+		changedFiles: recorder ? [...recorder.pendingChangedFiles] : [],
+		hmrModules: recorder ? [...recorder.pendingHmrModules] : [],
+		epochId: recorder?.currentEpochId ?? null,
 	});
+	if (recorder) {
+		recorder.lastHash = hash;
+		recorder.lastCaptureTs = ts;
+		recorder.pendingChangedFiles.clear();
+		recorder.pendingHmrModules.clear();
+	}
 	return { id, pngPath, hash };
+}
+
+/** Evaluate the page's devicePixelRatio (once per navigation). */
+async function evaluateRecorderDpr(cdp: CdpClientWrapper): Promise<number> {
+	try {
+		const result = (await cdp.send("Runtime.evaluate", {
+			expression: "window.devicePixelRatio",
+			returnByValue: true,
+		})) as { result?: { value?: unknown } };
+		const dpr = Number(result.result?.value);
+		return Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+	} catch {
+		return 1;
+	}
+}
+
+/** Queue a trigger-driven capture on the recorder's serial chain. This is
+ * also the Phase 3 hook for forcing a capture on demand. */
+function triggerRecorderCapture(_reason: string): Promise<void> {
+	const r = recorder;
+	if (!r) return Promise.resolve();
+	const run = async () => {
+		// Recording may have stopped (or restarted) while queued.
+		if (recorder !== r) return;
+		const session = registry.sessions.get(r.sessionName);
+		if (!session) return;
+		try {
+			await captureRecorderFrame(session, r.recordingDir);
+		} catch {
+			// best-effort: the page may be mid-navigation
+		}
+	};
+	r.captureChain = r.captureChain.then(run, run);
+	return r.captureChain;
+}
+
+/** Main-frame navigation: wait for load, refresh cached dpr, capture. */
+async function onRecorderNavigated(): Promise<void> {
+	const r = recorder;
+	if (!r) return;
+	const session = registry.sessions.get(r.sessionName);
+	const cdp = session ? asCdpExecutor(session) : null;
+	if (!cdp) return;
+	await waitForPageLoad(cdp, 10000);
+	if (recorder !== r) return;
+	r.dpr = await evaluateRecorderDpr(cdp);
+	await triggerRecorderCapture("navigated");
 }
 
 function recorderFrameCount(sessionName: string): number {
@@ -1000,9 +1111,27 @@ function recorderFrameCount(sessionName: string): number {
 	return Number(rows[0]?.c ?? 0);
 }
 
+function recorderEpochCount(sessionName: string): number {
+	const rows = store.query(
+		"SELECT COUNT(*) AS c FROM epochs WHERE session_id = ?",
+		[sessionName],
+	);
+	return Number(rows[0]?.c ?? 0);
+}
+
+function recorderLastCaptureTs(sessionName: string): number | null {
+	const rows = store.query(
+		"SELECT MAX(ts) AS t FROM captures WHERE session_id = ?",
+		[sessionName],
+	);
+	const t = rows[0]?.t;
+	return t == null ? null : Number(t);
+}
+
 async function handleRecordStart(
 	urls: string[],
 	viewport?: { width: number; height: number },
+	idleThresholdMs?: number,
 ): Promise<Response> {
 	if (recorder) {
 		return {
@@ -1070,6 +1199,33 @@ async function handleRecordStart(
 			});
 		}
 
+		// ── Phase 2 triggers: mutation binding, navigation, HMR wire-tap ──
+		// Installed before the first navigation so the injected observer runs
+		// in every document from the start.
+		await cdp.send("Runtime.addBinding", { name: MUTATION_BINDING });
+		await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+			source: MUTATION_OBSERVER_SOURCE,
+		});
+		const rawClient = cdp.getClient();
+		rawClient?.on("Runtime.bindingCalled", (params: unknown) => {
+			const p = params as { name?: string };
+			if (p.name !== MUTATION_BINDING) return;
+			void triggerRecorderCapture("mutation");
+		});
+		rawClient?.on("Page.frameNavigated", (params: unknown) => {
+			const p = params as { frame?: { parentId?: string } };
+			if (p.frame?.parentId) return; // main frame only
+			void onRecorderNavigated();
+		});
+		rawClient?.on("Network.webSocketFrameReceived", (params: unknown) => {
+			const r = recorder;
+			if (!r) return;
+			const p = params as { response?: { payloadData?: string } };
+			for (const mod of parseHmrModules(p.response?.payloadData ?? "")) {
+				r.pendingHmrModules.add(mod);
+			}
+		});
+
 		const nav = (await cdp.send("Page.navigate", { url: urls[0] })) as {
 			errorText?: string;
 		};
@@ -1089,8 +1245,48 @@ async function handleRecordStart(
 			sessionName: RECORDER_SESSION,
 			urls,
 			recordingDir,
+			idleThresholdMs: idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS,
+			dpr: 1,
+			lastHash: null,
+			lastCaptureTs: null,
+			pendingChangedFiles: new Set(),
+			pendingHmrModules: new Set(),
+			currentEpochId: null,
+			lastFsEventTs: Date.now(),
+			watcher: null,
+			captureChain: Promise.resolve(),
 		};
 		pendingChrome = null;
+
+		recorder.dpr = await evaluateRecorderDpr(cdp);
+
+		// Recursive FS watch on the recording cwd: saved files annotate the
+		// next capture; a save after >= idleThresholdMs of FS quiet opens a
+		// new auto epoch (inserted before the file accumulates).
+		try {
+			recorder.watcher = fs.watch(
+				process.cwd(),
+				{ recursive: true },
+				(_eventType, filename) => {
+					const r = recorder;
+					if (!r || typeof filename !== "string" || filename.length === 0)
+						return;
+					if (isIgnoredWatchPath(filename)) return;
+					const now = Date.now();
+					if (now - r.lastFsEventTs >= r.idleThresholdMs) {
+						r.currentEpochId = store.insertEpoch({
+							ts: now,
+							sessionId: r.sessionName,
+							auto: true,
+						});
+					}
+					r.lastFsEventTs = now;
+					r.pendingChangedFiles.add(filename);
+				},
+			);
+		} catch {
+			// fs.watch can fail on exotic filesystems; record without annotations
+		}
 
 		const frame = await captureRecorderFrame(session, recordingDir);
 
@@ -1111,7 +1307,9 @@ async function handleRecordStart(
 			pid: chrome.pid,
 			messages: [
 				`recording ${urls[0]} (chrome pid ${chrome.pid}, port ${chrome.port})`,
-				`frame ${frame.id} saved to ${frame.pngPath}`,
+				frame
+					? `frame ${frame.id} saved to ${frame.pngPath}`
+					: "initial frame deduped",
 			],
 			recording: {
 				running: true,
@@ -1123,6 +1321,7 @@ async function handleRecordStart(
 			},
 		};
 	} catch (e) {
+		recorder?.watcher?.close();
 		recorder = null;
 		pendingChrome = null;
 		const stale = registry.sessions.get(RECORDER_SESSION);
@@ -1143,8 +1342,9 @@ async function handleRecordStop(): Promise<Response> {
 		};
 	}
 
-	const { chrome, sessionName } = recorder;
+	const { chrome, sessionName, watcher } = recorder;
 	recorder = null;
+	watcher?.close();
 
 	const session = registry.sessions.get(sessionName);
 	if (session) {
@@ -1170,6 +1370,37 @@ async function handleRecordStop(): Promise<Response> {
 	};
 }
 
+async function handleRecordMark(name?: string): Promise<Response> {
+	if (!recorder) {
+		return {
+			ok: false,
+			error: "no recording in progress (dbg record <url> first)",
+		};
+	}
+	const ts = Date.now();
+	const id = store.insertEpoch({
+		ts,
+		sessionId: recorder.sessionName,
+		name: name ?? null,
+		auto: false,
+	});
+	recorder.currentEpochId = id;
+	store.record(
+		{
+			source: "daemon",
+			category: "recording",
+			method: "record.mark",
+			data: { id, name: name ?? null },
+			sessionId: recorder.sessionName,
+		},
+		true,
+	);
+	return {
+		ok: true,
+		messages: [`epoch ${id}${name ? ` "${name}"` : ""} marked`],
+	};
+}
+
 async function handleRecordStatus(): Promise<Response> {
 	if (!recorder) {
 		return {
@@ -1177,9 +1408,13 @@ async function handleRecordStatus(): Promise<Response> {
 			recording: {
 				running: false,
 				frameCount: recorderFrameCount(RECORDER_SESSION),
+				captureCount: recorderFrameCount(RECORDER_SESSION),
+				epochCount: recorderEpochCount(RECORDER_SESSION),
+				lastCaptureTs: recorderLastCaptureTs(RECORDER_SESSION),
 			},
 		};
 	}
+	const captureCount = recorderFrameCount(recorder.sessionName);
 	return {
 		ok: true,
 		recording: {
@@ -1187,7 +1422,11 @@ async function handleRecordStatus(): Promise<Response> {
 			pid: recorder.chrome.pid,
 			port: recorder.chrome.port,
 			urls: recorder.urls,
-			frameCount: recorderFrameCount(recorder.sessionName),
+			frameCount: captureCount,
+			captureCount,
+			epochCount: recorderEpochCount(recorder.sessionName),
+			lastCaptureTs:
+				recorder.lastCaptureTs ?? recorderLastCaptureTs(recorder.sessionName),
 			session: recorder.sessionName,
 		},
 	};
@@ -2009,11 +2248,13 @@ async function dispatch(cmd: Command): Promise<Response> {
 		case "targets":
 			return handleTargets(cmd.port, cmd.host);
 		case "record.start":
-			return handleRecordStart(cmd.urls, cmd.viewport);
+			return handleRecordStart(cmd.urls, cmd.viewport, cmd.idleThresholdMs);
 		case "record.stop":
 			return handleRecordStop();
 		case "record.status":
 			return handleRecordStatus();
+		case "record.mark":
+			return handleRecordMark(cmd.name);
 	}
 
 	// Session-scoped commands share an optional `session` field.
@@ -2254,6 +2495,7 @@ function startServer(): void {
 			// ignore
 		}
 		if (recorder) {
+			recorder.watcher?.close();
 			// cleanup() is synchronous; kick off SIGTERM→SIGKILL without awaiting.
 			void recorder.chrome.kill();
 			recorder = null;
