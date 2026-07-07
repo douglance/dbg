@@ -61,6 +61,7 @@ describe("recorder virtual tables", () => {
 			"changed_files",
 			"hmr_modules",
 			"epoch_id",
+			"snapshot_path",
 		]);
 		expect(result.rows).toHaveLength(1);
 		expect(result.rows[0][2]).toBe("recorder");

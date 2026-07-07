@@ -309,6 +309,23 @@ export interface AfterNetworkFailure {
 	error?: string;
 }
 
+export interface AfterRegion {
+	box: { x: number; y: number; w: number; h: number };
+	/** Component name, or a tag.class fallback on non-React pages. */
+	label: string;
+	component: string | null;
+	file: string | null;
+	/** True when the region's component file matches a changed/HMR'd file. */
+	causal: boolean;
+}
+
+export interface AfterStyleChange {
+	selector: string;
+	prop: string;
+	before: string;
+	after: string;
+}
+
 export interface AfterPair {
 	name: string;
 	baseline: { captureId: number; ts: number };
@@ -357,6 +374,8 @@ export interface OkResponse {
 	consoleDelta?: { new: AfterDeltaEntry[] };
 	exceptionDelta?: { new: AfterDeltaEntry[] };
 	networkDelta?: { failed: AfterNetworkFailure[] };
+	regions?: AfterRegion[];
+	styleChanges?: AfterStyleChange[];
 	reportPath?: string;
 	lastErrorCode?: string;
 	lastErrorMessage?: string;

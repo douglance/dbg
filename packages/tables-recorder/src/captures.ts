@@ -20,6 +20,7 @@ export const capturesTable: VirtualTable = {
 		"changed_files",
 		"hmr_modules",
 		"epoch_id",
+		"snapshot_path",
 	],
 	async fetch(_where, executor) {
 		const store = executor.getStore?.();
@@ -28,7 +29,7 @@ export const capturesTable: VirtualTable = {
 		}
 
 		const result = store.query(
-			`SELECT id, ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id
+			`SELECT id, ts, session_id, url, scroll_y, dpr, hash, png_path, changed_files, hmr_modules, epoch_id, snapshot_path
 			 FROM captures
 			 ORDER BY id DESC
 			 LIMIT 1000`,
@@ -48,6 +49,7 @@ export const capturesTable: VirtualTable = {
 				row.changed_files,
 				row.hmr_modules,
 				row.epoch_id,
+				row.snapshot_path,
 			]);
 
 		return { columns: this.columns, rows };

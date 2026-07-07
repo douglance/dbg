@@ -69,9 +69,16 @@ import {
 	resolveAnchor,
 } from "./recorder/anchor.js";
 import { parseHmrModules } from "./recorder/hmr.js";
+import {
+	buildRegions,
+	capturePageSnapshot,
+	diffSnapshots,
+	type PageSnapshot,
+} from "./recorder/snapshot.js";
 import { isIgnoredWatchPath } from "./recorder/watch.js";
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 // ─── State ───
 
@@ -1007,7 +1014,12 @@ async function captureRecorderFrame(
 	session: Session,
 	recordingDir: string,
 	opts?: { force?: boolean },
-): Promise<{ id: number; pngPath: string; hash: string } | null> {
+): Promise<{
+	id: number;
+	pngPath: string;
+	hash: string;
+	snapshotPath: string | null;
+} | null> {
 	const cdp = asCdpExecutor(session);
 	if (!cdp) throw new Error("recorder session is not a cdp session");
 
@@ -1023,6 +1035,19 @@ async function captureRecorderFrame(
 	fs.mkdirSync(recordingDir, { recursive: true });
 	const pngPath = path.join(recordingDir, `${ts}-${hash}.png`);
 	fs.writeFileSync(pngPath, buffer);
+
+	// DOM/style/component snapshot (Phase 4 blame + style-diff input) —
+	// best-effort; a capture without a snapshot is still a capture.
+	let snapshotPath: string | null = null;
+	try {
+		const snapshot = await capturePageSnapshot(cdp);
+		if (snapshot.elements.length > 0 || snapshot.components.length > 0) {
+			snapshotPath = path.join(recordingDir, `${ts}-${hash}-snapshot.json.gz`);
+			fs.writeFileSync(snapshotPath, gzipSync(JSON.stringify(snapshot)));
+		}
+	} catch {
+		// never fail the capture over its snapshot
+	}
 
 	let url = session.targetUrl ?? "";
 	let scrollY = 0;
@@ -1056,6 +1081,7 @@ async function captureRecorderFrame(
 		changedFiles: recorder ? [...recorder.pendingChangedFiles] : [],
 		hmrModules: recorder ? [...recorder.pendingHmrModules] : [],
 		epochId: recorder?.currentEpochId ?? null,
+		snapshotPath,
 	});
 	if (recorder) {
 		recorder.lastHash = hash;
@@ -1063,7 +1089,22 @@ async function captureRecorderFrame(
 		recorder.pendingChangedFiles.clear();
 		recorder.pendingHmrModules.clear();
 	}
-	return { id, pngPath, hash };
+	return { id, pngPath, hash, snapshotPath };
+}
+
+/** Read a capture's gzipped PageSnapshot from disk; null when absent/corrupt. */
+function loadPageSnapshot(snapshotPath?: string | null): PageSnapshot | null {
+	if (!snapshotPath) return null;
+	try {
+		const parsed = JSON.parse(
+			gunzipSync(fs.readFileSync(snapshotPath)).toString("utf8"),
+		) as PageSnapshot;
+		return Array.isArray(parsed.elements) && Array.isArray(parsed.components)
+			? parsed
+			: null;
+	} catch {
+		return null;
+	}
 }
 
 /** Evaluate the page's devicePixelRatio (once per navigation). */
@@ -1104,10 +1145,10 @@ function triggerRecorderCapture(_reason: string): Promise<void> {
  * capture chain. Used by record.after; Phase 4+ can reuse it. */
 async function forceRecorderCapture(
 	session: Session,
-): Promise<{ id: number; pngPath: string; hash: string } | null> {
+): Promise<Awaited<ReturnType<typeof captureRecorderFrame>>> {
 	const r = recorder;
 	if (!r) return null;
-	let out: { id: number; pngPath: string; hash: string } | null = null;
+	let out: Awaited<ReturnType<typeof captureRecorderFrame>> = null;
 	const run = async () => {
 		if (recorder !== r) return;
 		out = await captureRecorderFrame(session, r.recordingDir, { force: true });
@@ -1471,7 +1512,7 @@ async function handleRecordStatus(): Promise<Response> {
 function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
 	return store
 		.query(
-			`SELECT id, ts, url, scroll_y, png_path, changed_files
+			`SELECT id, ts, url, scroll_y, png_path, changed_files, snapshot_path
 			 FROM captures WHERE session_id = ? ORDER BY id`,
 			[sessionName],
 		)
@@ -1482,6 +1523,7 @@ function recorderCaptureRows(sessionName: string): AnchorCaptureRow[] {
 			scrollY: Number(row.scroll_y ?? 0),
 			pngPath: String(row.png_path ?? ""),
 			changedFiles: safeJsonArray(row.changed_files),
+			snapshotPath: row.snapshot_path == null ? null : String(row.snapshot_path),
 		}));
 }
 
@@ -1692,6 +1734,32 @@ async function handleRecordAfter(
 			.map((e) => ({ type: e.type, text: e.text, ts: e.ts }));
 		const networkNew = networkDeltaSince(anchor.ts);
 
+		// ── Phase 4: component blame + structural style diff ──
+		const baselineSnapshot = loadPageSnapshot(anchor.snapshotPath);
+		const afterSnapshot = loadPageSnapshot(frame.snapshotPath);
+		const changedSince = store
+			.query(
+				`SELECT changed_files, hmr_modules FROM captures
+				 WHERE session_id = ? AND ts > ?`,
+				[recorder.sessionName, anchor.ts],
+			)
+			.flatMap((row) => [
+				...safeJsonArray(row.changed_files),
+				...safeJsonArray(row.hmr_modules),
+			]);
+		const regions = afterSnapshot
+			? buildRegions(
+					diff.clusters,
+					afterSnapshot.components,
+					changedSince,
+					recorder.dpr,
+				)
+			: [];
+		const styleChanges =
+			baselineSnapshot && afterSnapshot
+				? diffSnapshots(baselineSnapshot.elements, afterSnapshot.elements)
+				: [];
+
 		const root = recordingsRootDir();
 		fs.mkdirSync(root, { recursive: true });
 		// PNG diff lives next to the captures it compares.
@@ -1719,6 +1787,11 @@ async function handleRecordAfter(
 						height: diff.height,
 						dimensionsChanged: diff.dimensionsChanged,
 					},
+					regions: regions.map((r) => ({
+						box: r.box,
+						label: r.causal ? `${r.label} (causal)` : r.label,
+					})),
+					styleChanges,
 					newErrors: [...consoleNew, ...exceptionsNew],
 					newNetworkFailures: networkNew.map((f) => ({
 						url: f.url,
@@ -1745,6 +1818,18 @@ async function handleRecordAfter(
 			diffPixels: diff.diffPixels,
 			reportPath,
 		});
+		store.insertRegions(
+			regions.map((r) => ({
+				diffId,
+				x: r.box.x,
+				y: r.box.y,
+				w: r.box.w,
+				h: r.box.h,
+				component: r.component,
+				file: r.file,
+				causal: r.causal,
+			})),
+		);
 		store.record(
 			{
 				source: "daemon",
@@ -1776,6 +1861,8 @@ async function handleRecordAfter(
 			consoleDelta: { new: consoleNew },
 			exceptionDelta: { new: exceptionsNew },
 			networkDelta: { failed: networkNew },
+			regions,
+			styleChanges,
 			reportPath,
 		};
 	} catch (e) {

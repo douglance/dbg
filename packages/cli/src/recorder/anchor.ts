@@ -12,6 +12,8 @@ export interface AnchorCaptureRow {
 	pngPath: string;
 	/** Parsed changed_files JSON column. */
 	changedFiles: string[];
+	/** Gzipped DOM/style/component snapshot on disk (Phase 4), if captured. */
+	snapshotPath?: string | null;
 }
 
 export interface AnchorEpochRow {

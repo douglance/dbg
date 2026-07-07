@@ -98,8 +98,8 @@ export class EventStore {
 		if (this.readUserVersion() !== SCHEMA_VERSION) {
 			this.dropKnownTables();
 		}
-		this.createTables();
 		try {
+			this.createTables();
 			this.prepareStatements();
 		} catch {
 			// Same version but a mismatched shape (hand-edited or corrupted DB):

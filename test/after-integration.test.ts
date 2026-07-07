@@ -173,6 +173,8 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 				consoleDelta?: { new: Array<{ type: string; text: string }> };
 				exceptionDelta?: { new: unknown[] };
 				networkDelta?: { failed: unknown[] };
+				regions?: Array<{ label: string; component: string | null }>;
+				styleChanges?: unknown[];
 				reportPath?: string;
 			};
 			expect(response.ok, after.stdout).toBe(true);
@@ -189,6 +191,17 @@ describe.runIf(hasChrome)("dbg after + timeline + replay (e2e)", () => {
 			expect(pair.dimensionsChanged).toBe(false);
 			expect(pair.after.captureId).toBeGreaterThan(pair.baseline.captureId);
 			expect(pair.after.ts).toBeGreaterThan(pair.baseline.ts);
+
+			// non-React degradation: regions exist with tag/class labels and
+			// null components; styleChanges array present; no error occurred
+			expect(Array.isArray(response.regions)).toBe(true);
+			expect(response.regions?.length).toBeGreaterThan(0);
+			for (const region of response.regions ?? []) {
+				expect(region.component).toBe(null);
+				expect(typeof region.label).toBe("string");
+				expect(region.label.length).toBeGreaterThan(0);
+			}
+			expect(Array.isArray(response.styleChanges)).toBe(true);
 
 			// ≥1 new console error mentioning the injected text (deduped across
 			// Chrome's Runtime + Log double-reporting: exactly one here)
