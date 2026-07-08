@@ -146,123 +146,121 @@ describe.runIf(hasChrome)("recorder triggers + annotations", () => {
 		fs.rmSync(chromeProfileDir, { recursive: true, force: true });
 	});
 
-	it(
-		"captures on mutation, annotates changed files, stamps epochs",
-		{ timeout: 120000 },
-		async () => {
-			// ── record.start with a lowered auto-epoch idle threshold ──
-			const start = dbg(
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--idle",
-				"500",
-				"--json",
-			);
-			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
-			const startResponse = JSON.parse(start.stdout) as {
-				ok: boolean;
-				recording?: { running: boolean; pid?: number };
+	it("captures on mutation, annotates changed files, stamps epochs", {
+		timeout: 120000,
+	}, async () => {
+		// ── record.start with a lowered auto-epoch idle threshold ──
+		const start = dbg(
+			"record",
+			fixtureUrl,
+			"--viewport",
+			"800x600",
+			"--idle",
+			"500",
+			"--json",
+		);
+		expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+		const startResponse = JSON.parse(start.stdout) as {
+			ok: boolean;
+			recording?: { running: boolean; pid?: number };
+		};
+		expect(startResponse.ok).toBe(true);
+		const chromePid = startResponse.recording?.pid as number;
+		expect(chromePid).toBeGreaterThan(0);
+
+		// Let the initial page settle (post-load mutation pings dedupe away).
+		await sleep(1500);
+		// (dbg q's SQL dialect has no AS aliases; COUNT(*) surfaces as "count")
+		const baseline = query(
+			"SELECT COUNT(*) FROM captures WHERE session_id = 'recorder'",
+		);
+		const baselineCount = Number(baseline[0].count);
+		expect(baselineCount).toBeGreaterThanOrEqual(1);
+
+		// ── (a) mutation 1: MutationObserver → binding → capture ──
+		const mut1 = dbg(
+			"e",
+			"document.body.append(Object.assign(document.createElement('h2'),{textContent:'mutation one'})); 'ok'",
+		);
+		expect(mut1.exitCode, mut1.stdout + mut1.stderr).toBe(0);
+		await sleep(2500); // 300ms in-page debounce + screenshot + insert
+
+		// ── (b) scratch file saved in the watched cwd between captures ──
+		// >= 500ms of FS quiet has passed since record.start, so this also
+		// opens an auto epoch (inserted before the file accumulates).
+		fs.writeFileSync(path.join(workDir, "scratch.txt"), "hello recorder");
+		await sleep(400); // let the FS event reach the daemon
+
+		// ── (c) named epoch via dbg mark ──
+		const mark = dbg("mark", "checkpoint", "--json");
+		expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
+		expect((JSON.parse(mark.stdout) as { ok: boolean }).ok).toBe(true);
+
+		// ── (a cont.) mutation 2 after an idle gap ──
+		const mut2 = dbg(
+			"e",
+			"document.body.append(Object.assign(document.createElement('h2'),{textContent:'mutation two'})); 'ok'",
+		);
+		expect(mut2.exitCode, mut2.stdout + mut2.stderr).toBe(0);
+		await sleep(2500);
+
+		// ── captures: >= 2 new distinct rows, all hashes unique ──
+		const captures = query(
+			"SELECT id, hash, changed_files, hmr_modules, epoch_id FROM captures WHERE session_id = 'recorder' ORDER BY id",
+		);
+		expect(captures.length).toBeGreaterThanOrEqual(baselineCount + 2);
+		const hashes = captures.map((c) => c.hash as string);
+		expect(new Set(hashes).size).toBe(hashes.length);
+
+		// ── changed_files: exactly one capture carries scratch.txt, then
+		// the accumulator is cleared ──
+		const carrying = captures.filter((c) =>
+			(JSON.parse(c.changed_files as string) as string[]).includes(
+				"scratch.txt",
+			),
+		);
+		expect(carrying.length).toBe(1);
+
+		// ── epochs: >= 2 rows, >= 1 auto, one named "checkpoint" ──
+		const epochs = query(
+			"SELECT id, name, auto FROM epochs WHERE session_id = 'recorder' ORDER BY id",
+		);
+		expect(epochs.length).toBeGreaterThanOrEqual(2);
+		expect(epochs.some((e) => Number(e.auto) === 1)).toBe(true);
+		const named = epochs.find((e) => e.name === "checkpoint");
+		expect(named).toBeDefined();
+		expect(Number(named?.auto)).toBe(0);
+
+		// ── captures carry epoch_id: the post-mark capture points at the
+		// named epoch ──
+		const last = captures[captures.length - 1];
+		expect(Number(last.epoch_id)).toBe(Number(named?.id));
+
+		// ── record.status gains lastCaptureTs / captureCount / epochCount ──
+		const status = dbg("record", "--status", "--json");
+		expect(status.exitCode, status.stdout + status.stderr).toBe(0);
+		const statusResponse = JSON.parse(status.stdout) as {
+			recording?: {
+				running: boolean;
+				captureCount?: number;
+				epochCount?: number;
+				lastCaptureTs?: number | null;
 			};
-			expect(startResponse.ok).toBe(true);
-			const chromePid = startResponse.recording?.pid as number;
-			expect(chromePid).toBeGreaterThan(0);
+		};
+		expect(statusResponse.recording?.running).toBe(true);
+		expect(statusResponse.recording?.captureCount).toBe(captures.length);
+		expect(statusResponse.recording?.epochCount).toBe(epochs.length);
+		expect(statusResponse.recording?.lastCaptureTs).toBeGreaterThan(0);
 
-			// Let the initial page settle (post-load mutation pings dedupe away).
-			await sleep(1500);
-			// (dbg q's SQL dialect has no AS aliases; COUNT(*) surfaces as "count")
-			const baseline = query(
-				"SELECT COUNT(*) FROM captures WHERE session_id = 'recorder'",
-			);
-			const baselineCount = Number(baseline[0].count);
-			expect(baselineCount).toBeGreaterThanOrEqual(1);
-
-			// ── (a) mutation 1: MutationObserver → binding → capture ──
-			const mut1 = dbg(
-				"e",
-				"document.body.append(Object.assign(document.createElement('h2'),{textContent:'mutation one'})); 'ok'",
-			);
-			expect(mut1.exitCode, mut1.stdout + mut1.stderr).toBe(0);
-			await sleep(2500); // 300ms in-page debounce + screenshot + insert
-
-			// ── (b) scratch file saved in the watched cwd between captures ──
-			// >= 500ms of FS quiet has passed since record.start, so this also
-			// opens an auto epoch (inserted before the file accumulates).
-			fs.writeFileSync(path.join(workDir, "scratch.txt"), "hello recorder");
-			await sleep(400); // let the FS event reach the daemon
-
-			// ── (c) named epoch via dbg mark ──
-			const mark = dbg("mark", "checkpoint", "--json");
-			expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
-			expect((JSON.parse(mark.stdout) as { ok: boolean }).ok).toBe(true);
-
-			// ── (a cont.) mutation 2 after an idle gap ──
-			const mut2 = dbg(
-				"e",
-				"document.body.append(Object.assign(document.createElement('h2'),{textContent:'mutation two'})); 'ok'",
-			);
-			expect(mut2.exitCode, mut2.stdout + mut2.stderr).toBe(0);
-			await sleep(2500);
-
-			// ── captures: >= 2 new distinct rows, all hashes unique ──
-			const captures = query(
-				"SELECT id, hash, changed_files, hmr_modules, epoch_id FROM captures WHERE session_id = 'recorder' ORDER BY id",
-			);
-			expect(captures.length).toBeGreaterThanOrEqual(baselineCount + 2);
-			const hashes = captures.map((c) => c.hash as string);
-			expect(new Set(hashes).size).toBe(hashes.length);
-
-			// ── changed_files: exactly one capture carries scratch.txt, then
-			// the accumulator is cleared ──
-			const carrying = captures.filter((c) =>
-				(JSON.parse(c.changed_files as string) as string[]).includes(
-					"scratch.txt",
-				),
-			);
-			expect(carrying.length).toBe(1);
-
-			// ── epochs: >= 2 rows, >= 1 auto, one named "checkpoint" ──
-			const epochs = query(
-				"SELECT id, name, auto FROM epochs WHERE session_id = 'recorder' ORDER BY id",
-			);
-			expect(epochs.length).toBeGreaterThanOrEqual(2);
-			expect(epochs.some((e) => Number(e.auto) === 1)).toBe(true);
-			const named = epochs.find((e) => e.name === "checkpoint");
-			expect(named).toBeDefined();
-			expect(Number(named?.auto)).toBe(0);
-
-			// ── captures carry epoch_id: the post-mark capture points at the
-			// named epoch ──
-			const last = captures[captures.length - 1];
-			expect(Number(last.epoch_id)).toBe(Number(named?.id));
-
-			// ── record.status gains lastCaptureTs / captureCount / epochCount ──
-			const status = dbg("record", "--status", "--json");
-			expect(status.exitCode, status.stdout + status.stderr).toBe(0);
-			const statusResponse = JSON.parse(status.stdout) as {
-				recording?: {
-					running: boolean;
-					captureCount?: number;
-					epochCount?: number;
-					lastCaptureTs?: number | null;
-				};
-			};
-			expect(statusResponse.recording?.running).toBe(true);
-			expect(statusResponse.recording?.captureCount).toBe(captures.length);
-			expect(statusResponse.recording?.epochCount).toBe(epochs.length);
-			expect(statusResponse.recording?.lastCaptureTs).toBeGreaterThan(0);
-
-			// ── stop; no orphan Chrome ──
-			const stop = dbg("record", "--stop", "--json");
-			expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
-			const deadline = Date.now() + 5000;
-			while (isAlive(chromePid) && Date.now() < deadline) {
-				await sleep(100);
-			}
-			expect(isAlive(chromePid)).toBe(false);
-		},
-	);
+		// ── stop; no orphan Chrome ──
+		const stop = dbg("record", "--stop", "--json");
+		expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
+		const deadline = Date.now() + 5000;
+		while (isAlive(chromePid) && Date.now() < deadline) {
+			await sleep(100);
+		}
+		expect(isAlive(chromePid)).toBe(false);
+	});
 });
 
 describe.runIf(!hasChrome)("recorder triggers (no Chrome)", () => {

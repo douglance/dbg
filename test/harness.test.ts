@@ -94,55 +94,50 @@ describe.runIf(hasChrome)("dbg shoot — component harness (e2e)", () => {
 		fs.rmSync(dbDir, { recursive: true, force: true });
 	});
 
-	it(
-		"renders Button.tsx with two prop sets; the PNGs diff nonzero",
-		{ timeout: 120000 },
-		() => {
-			const buttonPath = path.resolve(
-				__dirname,
-				"fixtures/react-app/Button.tsx",
-			);
+	it("renders Button.tsx with two prop sets; the PNGs diff nonzero", {
+		timeout: 120000,
+	}, () => {
+		const buttonPath = path.resolve(__dirname, "fixtures/react-app/Button.tsx");
 
-			const green = dbg(
-				"shoot",
-				buttonPath,
-				"--props",
-				'{"tone":"green"}',
-				"--name",
-				"btn-green",
-				"--json",
-			);
-			expect(green.exitCode, green.stdout + green.stderr).toBe(0);
-			const red = dbg(
-				"shoot",
-				buttonPath,
-				"--props",
-				'{"tone":"red","label":"changed label"}',
-				"--name",
-				"btn-red",
-				"--json",
-			);
-			expect(red.exitCode, red.stdout + red.stderr).toBe(0);
+		const green = dbg(
+			"shoot",
+			buttonPath,
+			"--props",
+			'{"tone":"green"}',
+			"--name",
+			"btn-green",
+			"--json",
+		);
+		expect(green.exitCode, green.stdout + green.stderr).toBe(0);
+		const red = dbg(
+			"shoot",
+			buttonPath,
+			"--props",
+			'{"tone":"red","label":"changed label"}',
+			"--name",
+			"btn-red",
+			"--json",
+		);
+		expect(red.exitCode, red.stdout + red.stderr).toBe(0);
 
-			const greenShot = (
-				JSON.parse(green.stdout) as {
-					shots?: Array<{ path: string }>;
-				}
-			).shots?.[0];
-			const redShot = (
-				JSON.parse(red.stdout) as { shots?: Array<{ path: string }> }
-			).shots?.[0];
-			expect(greenShot && redShot).toBeTruthy();
+		const greenShot = (
+			JSON.parse(green.stdout) as {
+				shots?: Array<{ path: string }>;
+			}
+		).shots?.[0];
+		const redShot = (
+			JSON.parse(red.stdout) as { shots?: Array<{ path: string }> }
+		).shots?.[0];
+		expect(greenShot && redShot).toBeTruthy();
 
-			const greenPng = fs.readFileSync((greenShot as { path: string }).path);
-			const redPng = fs.readFileSync((redShot as { path: string }).path);
-			const diff = diffPngs(greenPng, redPng);
-			expect(diff.diffPixels).toBeGreaterThan(0);
+		const greenPng = fs.readFileSync((greenShot as { path: string }).path);
+		const redPng = fs.readFileSync((redShot as { path: string }).path);
+		const diff = diffPngs(greenPng, redPng);
+		expect(diff.diffPixels).toBeGreaterThan(0);
 
-			// clipped to the harness root, not the whole viewport
-			expect(PNG.sync.read(greenPng).width).toBeLessThan(1280);
-		},
-	);
+		// clipped to the harness root, not the whole viewport
+		expect(PNG.sync.read(greenPng).width).toBeLessThan(1280);
+	});
 });
 
 describe.runIf(!hasChrome)("dbg shoot harness (no Chrome)", () => {

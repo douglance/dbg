@@ -172,87 +172,82 @@ describe.runIf(hasChrome)("perf budgets — debug/diff loop", () => {
 		}
 	});
 
-	it(
-		"stays inside every budget across the full loop",
-		{ timeout: 120000 },
-		async () => {
-			// ── record.start cold: daemon spawn + Chrome launch + capture ──
-			const recordMs = timed(
-				"record.start",
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--json",
-			);
-			assertBudget("record.start (cold)", recordMs, BUDGET_MS.recordStart);
-			const chromePid = (
-				JSON.parse(dbg("record", "--status", "--json").stdout) as {
-					recording?: { pid?: number };
-				}
-			).recording?.pid as number;
-
-			// ── record.mark ──
-			const markMs = timed("mark", "mark", "perf-check", "--json");
-			assertBudget("record.mark", markMs, BUDGET_MS.mark);
-
-			// ── mutation → capture latency ──
-			// Clock starts when the mutating eval returns; a captures row must
-			// appear within budget (in-page debounce is 300ms). Poll granularity
-			// (~1 CLI call ≈ 60-100ms) is inside the budget's headroom.
-			const before = captureCount();
-			const mutate = dbg(
-				"e",
-				"document.body.append(Object.assign(document.createElement('h2'),{textContent:'perf mutation'})); 'ok'",
-			);
-			expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
-			const mutationStarted = Date.now();
-			let mutationMs = Number.POSITIVE_INFINITY;
-			while (
-				Date.now() - mutationStarted <
-				BUDGET_MS.mutationToCapture + 2000
-			) {
-				if (captureCount() > before) {
-					mutationMs = Date.now() - mutationStarted;
-					break;
-				}
+	it("stays inside every budget across the full loop", {
+		timeout: 120000,
+	}, async () => {
+		// ── record.start cold: daemon spawn + Chrome launch + capture ──
+		const recordMs = timed(
+			"record.start",
+			"record",
+			fixtureUrl,
+			"--viewport",
+			"800x600",
+			"--json",
+		);
+		assertBudget("record.start (cold)", recordMs, BUDGET_MS.recordStart);
+		const chromePid = (
+			JSON.parse(dbg("record", "--status", "--json").stdout) as {
+				recording?: { pid?: number };
 			}
-			assertBudget("mutation→capture", mutationMs, BUDGET_MS.mutationToCapture);
+		).recording?.pid as number;
 
-			// ── record.after end-to-end ──
-			const afterMs = timed("after", "after", "--json");
-			assertBudget("record.after", afterMs, BUDGET_MS.after);
+		// ── record.mark ──
+		const markMs = timed("mark", "mark", "perf-check", "--json");
+		assertBudget("record.mark", markMs, BUDGET_MS.mark);
 
-			// ── record.timeline ──
-			const timelineMs = timed("timeline", "timeline", "--json");
-			assertBudget("record.timeline", timelineMs, BUDGET_MS.timeline);
-
-			// ── record.shoot (throwaway Chrome) ──
-			const shootMs = timed(
-				"shoot",
-				"shoot",
-				fixtureUrl,
-				"--name",
-				"perfshot",
-				"--json",
-			);
-			assertBudget("record.shoot", shootMs, BUDGET_MS.shoot);
-
-			// Surface the measured numbers in the test output.
-			console.info(
-				`perf: record=${recordMs}ms mark=${markMs}ms mutation→capture=${mutationMs}ms after=${afterMs}ms timeline=${timelineMs}ms shoot=${shootMs}ms`,
-			);
-
-			// ── stop; no orphan Chrome ──
-			const stop = dbg("record", "--stop", "--json");
-			expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
-			const deadline = Date.now() + 5000;
-			while (isAlive(chromePid) && Date.now() < deadline) {
-				await sleep(100);
+		// ── mutation → capture latency ──
+		// Clock starts when the mutating eval returns; a captures row must
+		// appear within budget (in-page debounce is 300ms). Poll granularity
+		// (~1 CLI call ≈ 60-100ms) is inside the budget's headroom.
+		const before = captureCount();
+		const mutate = dbg(
+			"e",
+			"document.body.append(Object.assign(document.createElement('h2'),{textContent:'perf mutation'})); 'ok'",
+		);
+		expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
+		const mutationStarted = Date.now();
+		let mutationMs = Number.POSITIVE_INFINITY;
+		while (Date.now() - mutationStarted < BUDGET_MS.mutationToCapture + 2000) {
+			if (captureCount() > before) {
+				mutationMs = Date.now() - mutationStarted;
+				break;
 			}
-			expect(isAlive(chromePid)).toBe(false);
-		},
-	);
+		}
+		assertBudget("mutation→capture", mutationMs, BUDGET_MS.mutationToCapture);
+
+		// ── record.after end-to-end ──
+		const afterMs = timed("after", "after", "--json");
+		assertBudget("record.after", afterMs, BUDGET_MS.after);
+
+		// ── record.timeline ──
+		const timelineMs = timed("timeline", "timeline", "--json");
+		assertBudget("record.timeline", timelineMs, BUDGET_MS.timeline);
+
+		// ── record.shoot (throwaway Chrome) ──
+		const shootMs = timed(
+			"shoot",
+			"shoot",
+			fixtureUrl,
+			"--name",
+			"perfshot",
+			"--json",
+		);
+		assertBudget("record.shoot", shootMs, BUDGET_MS.shoot);
+
+		// Surface the measured numbers in the test output.
+		console.info(
+			`perf: record=${recordMs}ms mark=${markMs}ms mutation→capture=${mutationMs}ms after=${afterMs}ms timeline=${timelineMs}ms shoot=${shootMs}ms`,
+		);
+
+		// ── stop; no orphan Chrome ──
+		const stop = dbg("record", "--stop", "--json");
+		expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
+		const deadline = Date.now() + 5000;
+		while (isAlive(chromePid) && Date.now() < deadline) {
+			await sleep(100);
+		}
+		expect(isAlive(chromePid)).toBe(false);
+	});
 });
 
 describe.runIf(!hasChrome)("perf budgets (no Chrome)", () => {

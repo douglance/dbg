@@ -320,6 +320,12 @@ export type Command =
 	| SessionScoped<{ cmd: "tap.rm"; id: number }>
 	// Show a tap's hits (most-recent `tail`).
 	| { cmd: "tap.hits"; id: number; tail?: number }
+	// ─── Flows (recorded user action replay; global recorder session) ───
+	| { cmd: "flow.record"; name: string; url?: string }
+	| { cmd: "flow.stop" }
+	| { cmd: "flow.run"; name: string; stepTimeoutMs?: number }
+	| { cmd: "flow.list" }
+	| { cmd: "flow.show"; name: string }
 	// One-off deliberate capture: URL, or a component file rendered in an
 	// esbuild harness (#dbg-root). Launches a throwaway Chrome; `states` are
 	// forced via CSS.forcePseudoState and each produces its own PNG.
@@ -459,6 +465,25 @@ export interface WhyVerdict {
 	answer: string;
 }
 
+export interface FlowRunResult {
+	runId: number;
+	flowName: string;
+	status: "passed" | "failed";
+	stepsTotal: number;
+	stepsPassed: number;
+	stepsFailed: number;
+	newErrors: AfterDeltaEntry[];
+	steps: Array<{
+		idx: number;
+		kind: string;
+		selector: string | null;
+		status: string;
+		captureId: number | null;
+		error: string | null;
+		diffPercent: number | null;
+	}>;
+}
+
 export interface AfterPair {
 	name: string;
 	baseline: { captureId: number; ts: number };
@@ -521,6 +546,7 @@ export interface OkResponse {
 	a11yNew?: AfterA11yIssue[];
 	perfDelta?: AfterPerfDelta;
 	why?: WhyVerdict;
+	flowRun?: FlowRunResult;
 	regions?: AfterRegion[];
 	styleChanges?: AfterStyleChange[];
 	reportPath?: string;

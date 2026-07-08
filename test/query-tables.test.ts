@@ -3,11 +3,7 @@ import { TableRegistry } from "../packages/query/src/index.js";
 import {
 	asyncFramesTable,
 	breakpointsTable,
-	cdpMessagesTable,
-	cdpTable,
-	connectionsTable,
 	consoleTable,
-	eventsTable,
 	exceptionsTable,
 	framesTable,
 	listenersTable,
@@ -885,7 +881,7 @@ describe("query tables", () => {
 
 	it("queries DOM elements with selector filter", async () => {
 		const state = createState();
-		const { executor } = createExecutor(state, (method, params) => {
+		const { executor } = createExecutor(state, (method, _params) => {
 			switch (method) {
 				case "DOM.getDocument":
 					return { root: { nodeId: 1 } };

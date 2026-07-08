@@ -1,6 +1,5 @@
 // Variables table — fetches properties from scope objects via CDP
 
-import type { WhereExpr } from "@dbg/query";
 import type { VirtualTable } from "@dbg/query";
 import { extractFilterValue } from "./utils.js";
 

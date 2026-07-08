@@ -123,142 +123,138 @@ describe.runIf(hasChrome)("Plan V e2e — verdicts", () => {
 		}
 	});
 
-	it(
-		"dbg why / networkDiff / stateChanges / a11y",
-		{ timeout: 120000 },
-		async () => {
-			const start = dbg(
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--idle",
-				"500",
-				"--json",
-			);
-			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
-			expect((JSON.parse(start.stdout) as { ok: boolean }).ok).toBe(true);
-			await sleep(1500); // initial capture: labeled button, empty storage, /api/ok
+	it("dbg why / networkDiff / stateChanges / a11y", {
+		timeout: 120000,
+	}, async () => {
+		const start = dbg(
+			"record",
+			fixtureUrl,
+			"--viewport",
+			"800x600",
+			"--idle",
+			"500",
+			"--json",
+		);
+		expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+		expect((JSON.parse(start.stdout) as { ok: boolean }).ok).toBe(true);
+		await sleep(1500); // initial capture: labeled button, empty storage, /api/ok
 
-			// Clean baseline anchor.
-			const mark = dbg("mark", "baseline", "--json");
-			expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
+		// Clean baseline anchor.
+		const mark = dbg("mark", "baseline", "--json");
+		expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
 
-			// `after` re-captures the LIVE page (the URL is unchanged, so it does
-			// not reload) — so mutate the live DOM/state directly: set a
-			// localStorage key (→ stateChanges), strip the button's accessible
-			// name (→ new a11y issue), and fire the changed fetch (→ networkDiff,
-			// recorded before `after` runs). Then save a watched file + raise an
-			// error for `dbg why`.
-			const mutate = dbg(
-				"e",
-				"localStorage.setItem('broke','1');" +
-					"fetch('/api/error').catch(()=>{});" +
-					"var b=document.getElementById('btn'); b.textContent=''; b.removeAttribute('aria-label');" +
-					"'ok'",
-			);
-			expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
-			await sleep(700); // 500 response records + mutation-capture settles
-			fs.writeFileSync(path.join(workDir, "Cart.tsx"), "// coupon field\n");
-			await sleep(400);
-			const err = dbg("e", "console.error('boom-coupon'); 'ok'");
-			expect(err.exitCode, err.stdout + err.stderr).toBe(0);
-			await sleep(1000);
+		// `after` re-captures the LIVE page (the URL is unchanged, so it does
+		// not reload) — so mutate the live DOM/state directly: set a
+		// localStorage key (→ stateChanges), strip the button's accessible
+		// name (→ new a11y issue), and fire the changed fetch (→ networkDiff,
+		// recorded before `after` runs). Then save a watched file + raise an
+		// error for `dbg why`.
+		const mutate = dbg(
+			"e",
+			"localStorage.setItem('broke','1');" +
+				"fetch('/api/error').catch(()=>{});" +
+				"var b=document.getElementById('btn'); b.textContent=''; b.removeAttribute('aria-label');" +
+				"'ok'",
+		);
+		expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
+		await sleep(700); // 500 response records + mutation-capture settles
+		fs.writeFileSync(path.join(workDir, "Cart.tsx"), "// coupon field\n");
+		await sleep(400);
+		const err = dbg("e", "console.error('boom-coupon'); 'ok'");
+		expect(err.exitCode, err.stdout + err.stderr).toBe(0);
+		await sleep(1000);
 
-			// ── dbg after --at mark:baseline ──
-			const after = dbg("after", "baseline", "--json");
-			expect(after.exitCode, after.stdout + after.stderr).toBe(0);
-			const afterRes = JSON.parse(after.stdout) as {
-				ok: boolean;
-				reportPath?: string;
-				networkDiff?: {
-					added: Array<{ pattern: string; status: number }>;
-					removed: Array<{ pattern: string }>;
-					statusChanged: Array<{ pattern: string; after: number }>;
-				};
-				stateChanges?: Array<{ key: string; change: string }>;
-				a11yNew?: Array<{ rule: string; selector: string }>;
+		// ── dbg after --at mark:baseline ──
+		const after = dbg("after", "baseline", "--json");
+		expect(after.exitCode, after.stdout + after.stderr).toBe(0);
+		const afterRes = JSON.parse(after.stdout) as {
+			ok: boolean;
+			reportPath?: string;
+			networkDiff?: {
+				added: Array<{ pattern: string; status: number }>;
+				removed: Array<{ pattern: string }>;
+				statusChanged: Array<{ pattern: string; after: number }>;
 			};
-			expect(afterRes.ok).toBe(true);
+			stateChanges?: Array<{ key: string; change: string }>;
+			a11yNew?: Array<{ rule: string; selector: string }>;
+		};
+		expect(afterRes.ok).toBe(true);
 
-			// (b) networkDiff caught the URL/status flip (/api/ok → /api/error 500).
-			const nd = afterRes.networkDiff;
-			expect(nd).toBeDefined();
-			const netPatterns = [
-				...(nd?.added ?? []).map((a) => a.pattern),
-				...(nd?.removed ?? []).map((r) => r.pattern),
-				...(nd?.statusChanged ?? []).map((s) => s.pattern),
-			].join(" ");
-			expect(netPatterns).toContain("api/error");
+		// (b) networkDiff caught the URL/status flip (/api/ok → /api/error 500).
+		const nd = afterRes.networkDiff;
+		expect(nd).toBeDefined();
+		const netPatterns = [
+			...(nd?.added ?? []).map((a) => a.pattern),
+			...(nd?.removed ?? []).map((r) => r.pattern),
+			...(nd?.statusChanged ?? []).map((s) => s.pattern),
+		].join(" ");
+		expect(netPatterns).toContain("api/error");
 
-			// (c) stateChanges shows the new localStorage key.
-			const broke = (afterRes.stateChanges ?? []).find(
-				(c) => c.key === "broke",
-			);
-			expect(broke?.change).toBe("added");
+		// (c) stateChanges shows the new localStorage key.
+		const broke = (afterRes.stateChanges ?? []).find((c) => c.key === "broke");
+		expect(broke?.change).toBe("added");
 
-			// (c) a NEW a11y issue: the button lost its accessible name.
-			expect((afterRes.a11yNew ?? []).map((i) => i.rule)).toContain(
-				"control-missing-name",
-			);
+		// (c) a NEW a11y issue: the button lost its accessible name.
+		expect((afterRes.a11yNew ?? []).map((i) => i.rule)).toContain(
+			"control-missing-name",
+		);
 
-			// report.html gains the new panels.
-			const html = fs.readFileSync(String(afterRes.reportPath), "utf8");
-			expect(html).toContain("New a11y issues");
-			expect(html).toContain("State changes");
-			expect(html).toContain("Network diff");
+		// report.html gains the new panels.
+		const html = fs.readFileSync(String(afterRes.reportPath), "utf8");
+		expect(html).toContain("New a11y issues");
+		expect(html).toContain("State changes");
+		expect(html).toContain("Network diff");
 
-			// netfail is a first-class timeline kind (wall-clock ts from events).
-			const tl = dbg(
-				"q",
-				"SELECT COUNT(*) FROM timeline WHERE kind = 'netfail'",
-				"--json",
-			);
-			expect(tl.exitCode, tl.stdout + tl.stderr).toBe(0);
-			expect(
-				Number((JSON.parse(tl.stdout) as { rows: unknown[][] }).rows[0][0]),
-			).toBeGreaterThan(0);
+		// netfail is a first-class timeline kind (wall-clock ts from events).
+		const tl = dbg(
+			"q",
+			"SELECT COUNT(*) FROM timeline WHERE kind = 'netfail'",
+			"--json",
+		);
+		expect(tl.exitCode, tl.stdout + tl.stderr).toBe(0);
+		expect(
+			Number((JSON.parse(tl.stdout) as { rows: unknown[][] }).rows[0][0]),
+		).toBeGreaterThan(0);
 
-			// Sections are individually skippable.
-			const skip = dbg(
-				"after",
-				"baseline",
-				"--skip-network",
-				"--skip-state",
-				"--skip-a11y",
-				"--json",
-			);
-			expect(skip.exitCode, skip.stdout + skip.stderr).toBe(0);
-			const skipRes = JSON.parse(skip.stdout) as {
-				ok: boolean;
-				networkDiff?: unknown;
-				stateChanges?: unknown[];
-				a11yNew?: unknown[];
+		// Sections are individually skippable.
+		const skip = dbg(
+			"after",
+			"baseline",
+			"--skip-network",
+			"--skip-state",
+			"--skip-a11y",
+			"--json",
+		);
+		expect(skip.exitCode, skip.stdout + skip.stderr).toBe(0);
+		const skipRes = JSON.parse(skip.stdout) as {
+			ok: boolean;
+			networkDiff?: unknown;
+			stateChanges?: unknown[];
+			a11yNew?: unknown[];
+		};
+		expect(skipRes.ok).toBe(true);
+		expect(skipRes.networkDiff).toBeUndefined();
+		expect(skipRes.stateChanges ?? []).toHaveLength(0);
+		expect(skipRes.a11yNew ?? []).toHaveLength(0);
+
+		// (a) dbg why works AFTER record --stop (persisted error history) and
+		// still names the saved file.
+		dbg("record", "--stop", "--json");
+		const why = dbg("why", "boom-coupon", "--json");
+		expect(why.exitCode, why.stdout + why.stderr).toBe(0);
+		const whyRes = JSON.parse(why.stdout) as {
+			ok: boolean;
+			why?: {
+				answer: string;
+				edits: Array<{ path: string }>;
 			};
-			expect(skipRes.ok).toBe(true);
-			expect(skipRes.networkDiff).toBeUndefined();
-			expect(skipRes.stateChanges ?? []).toHaveLength(0);
-			expect(skipRes.a11yNew ?? []).toHaveLength(0);
-
-			// (a) dbg why works AFTER record --stop (persisted error history) and
-			// still names the saved file.
-			dbg("record", "--stop", "--json");
-			const why = dbg("why", "boom-coupon", "--json");
-			expect(why.exitCode, why.stdout + why.stderr).toBe(0);
-			const whyRes = JSON.parse(why.stdout) as {
-				ok: boolean;
-				why?: {
-					answer: string;
-					edits: Array<{ path: string }>;
-				};
-			};
-			expect(whyRes.ok).toBe(true);
-			expect(whyRes.why?.answer).toContain("Cart.tsx");
-			expect(whyRes.why?.edits.some((e) => e.path.includes("Cart.tsx"))).toBe(
-				true,
-			);
-		},
-	);
+		};
+		expect(whyRes.ok).toBe(true);
+		expect(whyRes.why?.answer).toContain("Cart.tsx");
+		expect(whyRes.why?.edits.some((e) => e.path.includes("Cart.tsx"))).toBe(
+			true,
+		);
+	});
 });
 
 describe.runIf(!hasChrome)("Plan V e2e (no Chrome)", () => {

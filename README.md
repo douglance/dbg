@@ -188,6 +188,27 @@ The `__dbg_tap:` console sentinel is routed to `tap_hits` and suppressed from th
 user console, `after` consoleDelta, `dbg why`, and the timeline — taps never
 pollute the signals they observe.
 
+### Flows (record and replay)
+
+Flows record user actions on the active recorder page and replay them later with
+per-step readiness gates, captures, console verdicts, and diff-vs-last-run data.
+
+```sh
+dbg record http://localhost:3000
+dbg flow record checkout
+dbg flow stop
+dbg flow run checkout --step-timeout 5000
+dbg flow list
+dbg flow show checkout
+dbg q "SELECT * FROM flow_run_steps"
+```
+
+Selectors prefer unique `#id`, then `[data-testid]`, then a unique tag/class
+selector, then a full `nth-of-type` fallback path.
+Scroll-only flows are valid too: recording `window.scrollTo(...)` or a user
+scroll persists a `scroll` step and replays it against static `file://` reports
+as well as app pages.
+
 ### Inspection
 
 ```sh
@@ -364,6 +385,10 @@ edits, git commits, screenshots, and agent history join directly:
 | `perf_samples` | Perf flight recorder: observer batches + per-capture metrics/bundle-bytes | `ts`, `nav_id`, `capture_id`, `metric`, `value`, `detail` |
 | `taps` | Logpoints (never-pausing conditioned breakpoints) | `id`, `session_id`, `file`, `line`, `expr`, `url_regex` |
 | `tap_hits` | Each tap fire | `tap_id`, `ts`, `value` |
+| `flows` | Recorded user flows | `id`, `ts`, `name`, `url`, `session_id` |
+| `flow_steps` | Recorded flow actions | `flow_id`, `idx`, `kind`, `selector`, `fallback_path`, `value` |
+| `flow_runs` | Flow replay summaries | `id`, `ts`, `flow_id`, `status`, `steps_total`, `steps_passed` |
+| `flow_run_steps` | Per-step replay verdicts | `run_id`, `step_id`, `idx`, `status`, `capture_id`, `error`, `diff_percent` |
 | `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |
 | `agent_prompts` | Claude Code prompts, cwd-scoped (`WHERE project = '<slug>'` widens) | `ts`, `display`, `project` |
 | `agent_sessions` | Per-session transcript summaries (cached by mtime/size) | `session_id`, `ts_first`, `ts_last`, `title`, `message_count` |

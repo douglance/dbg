@@ -2,25 +2,24 @@
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "baseUrl": ".",
     "paths": {
-      "@dbg/types": ["packages/types/src/index.ts"],
-      "@dbg/store": ["packages/store/src/index.ts"],
-      "@dbg/query": ["packages/query/src/index.ts"],
-      "@dbg/adapter-cdp": ["packages/adapter-cdp/src/index.ts"],
-      "@dbg/adapter-dap": ["packages/adapter-dap/src/index.ts"],
-      "@dbg/diff": ["packages/diff/src/index.ts"],
-      "@dbg/report": ["packages/report/src/index.ts"],
-      "@dbg/launcher": ["packages/launcher/src/index.ts"],
+      "@dbg/types": ["./packages/types/src/index.ts"],
+      "@dbg/store": ["./packages/store/src/index.ts"],
+      "@dbg/query": ["./packages/query/src/index.ts"],
+      "@dbg/adapter-cdp": ["./packages/adapter-cdp/src/index.ts"],
+      "@dbg/adapter-dap": ["./packages/adapter-dap/src/index.ts"],
+      "@dbg/diff": ["./packages/diff/src/index.ts"],
+      "@dbg/report": ["./packages/report/src/index.ts"],
+      "@dbg/launcher": ["./packages/launcher/src/index.ts"],
       "@dbg/provider-apple-device": [
-        "packages/provider-apple-device/src/index.ts"
+        "./packages/provider-apple-device/src/index.ts"
       ],
-      "@dbg/tables-core": ["packages/tables-core/src/index.ts"],
-      "@dbg/tables-browser": ["packages/tables-browser/src/index.ts"],
-      "@dbg/tables-native": ["packages/tables-native/src/index.ts"],
-      "@dbg/tables-recorder": ["packages/tables-recorder/src/index.ts"],
-      "@dbg/tables-dev": ["packages/tables-dev/src/index.ts"],
-      "@dbg/cli": ["packages/cli/src/index.ts"]
+      "@dbg/tables-core": ["./packages/tables-core/src/index.ts"],
+      "@dbg/tables-browser": ["./packages/tables-browser/src/index.ts"],
+      "@dbg/tables-native": ["./packages/tables-native/src/index.ts"],
+      "@dbg/tables-recorder": ["./packages/tables-recorder/src/index.ts"],
+      "@dbg/tables-dev": ["./packages/tables-dev/src/index.ts"],
+      "@dbg/cli": ["./packages/cli/src/index.ts"]
     }
   },
   "include": ["packages/**/*.ts", "test/**/*.ts"]

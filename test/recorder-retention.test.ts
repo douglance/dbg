@@ -78,6 +78,7 @@ function makeRecording(eventStore: EventStore): TestRecording {
 				url: "http://localhost:3000/",
 				hash,
 				pngPath,
+				epochId,
 			});
 		},
 	};

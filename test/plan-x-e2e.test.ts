@@ -129,77 +129,75 @@ describe.runIf(hasChrome)("Plan X — perf flight recorder", () => {
 		}
 	});
 
-	it(
-		"reports CLS + bundle-bytes deltas; --skip-perf omits perfDelta",
-		{ timeout: 120000 },
-		async () => {
-			const rec = dbg("record", url, "--viewport", "800x600", "--json");
-			expect(rec.exitCode, rec.stdout + rec.stderr).toBe(0);
-			const chromePid = (
-				JSON.parse(dbg("record", "--status", "--json").stdout) as {
-					recording?: { pid?: number };
-				}
-			).recording?.pid as number;
-			await sleep(1000); // initial page + buffered observer settle
-
-			expect(dbg("mark", "baseline", "--json").exitCode).toBe(0);
-
-			// Prepend a tall block (layout shift) and append the big script.
-			const mutate = dbg(
-				"e",
-				"document.body.insertAdjacentHTML('afterbegin','<div style=\"height:600px;background:#c33\">pushdown</div>'); var s=document.createElement('script'); s.src='/big.js'; document.body.appendChild(s); 'ok'",
-			);
-			expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
-
-			// 1s observer flush + script load + capture settle.
-			await sleep(2000);
-
-			const after = dbg("after", "baseline", "--json");
-			expect(after.exitCode, after.stdout + after.stderr).toBe(0);
-			const parsed = JSON.parse(after.stdout) as {
-				perfDelta?: {
-					cls: { delta: number };
-					bundleBytes: {
-						anchor: number | null;
-						after: number | null;
-						delta: number | null;
-					};
-				};
-				reportPath?: string;
-			};
-			expect(parsed.perfDelta, after.stdout).toBeDefined();
-			expect(parsed.perfDelta?.cls.delta).toBeGreaterThan(0);
-			expect(parsed.perfDelta?.bundleBytes.delta ?? 0).toBeGreaterThan(0);
-
-			// report.html carries the Performance panel.
-			const reportHtml = fs.readFileSync(parsed.reportPath as string, "utf8");
-			expect(reportHtml).toContain("Performance");
-			expect(reportHtml).toContain("Δbundle_bytes");
-
-			// perf_samples has rows.
-			const q = dbg("q", "SELECT COUNT(*) AS c FROM perf_samples", "--json");
-			expect(q.exitCode, q.stdout + q.stderr).toBe(0);
-			const count = Number(
-				(JSON.parse(q.stdout) as { rows: unknown[][] }).rows[0][0],
-			);
-			expect(count).toBeGreaterThan(0);
-
-			// --skip-perf omits perfDelta.
-			const skip = dbg("after", "baseline", "--skip-perf", "--json");
-			expect(skip.exitCode, skip.stdout + skip.stderr).toBe(0);
-			expect(
-				(JSON.parse(skip.stdout) as { perfDelta?: unknown }).perfDelta,
-			).toBeUndefined();
-
-			// stop; no orphan Chrome.
-			expect(dbg("record", "--stop", "--json").exitCode).toBe(0);
-			const deadline = Date.now() + 5000;
-			while (isAlive(chromePid) && Date.now() < deadline) {
-				await sleep(100);
+	it("reports CLS + bundle-bytes deltas; --skip-perf omits perfDelta", {
+		timeout: 120000,
+	}, async () => {
+		const rec = dbg("record", url, "--viewport", "800x600", "--json");
+		expect(rec.exitCode, rec.stdout + rec.stderr).toBe(0);
+		const chromePid = (
+			JSON.parse(dbg("record", "--status", "--json").stdout) as {
+				recording?: { pid?: number };
 			}
-			expect(isAlive(chromePid)).toBe(false);
-		},
-	);
+		).recording?.pid as number;
+		await sleep(1000); // initial page + buffered observer settle
+
+		expect(dbg("mark", "baseline", "--json").exitCode).toBe(0);
+
+		// Prepend a tall block (layout shift) and append the big script.
+		const mutate = dbg(
+			"e",
+			"document.body.insertAdjacentHTML('afterbegin','<div style=\"height:600px;background:#c33\">pushdown</div>'); var s=document.createElement('script'); s.src='/big.js'; document.body.appendChild(s); 'ok'",
+		);
+		expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
+
+		// 1s observer flush + script load + capture settle.
+		await sleep(2000);
+
+		const after = dbg("after", "baseline", "--json");
+		expect(after.exitCode, after.stdout + after.stderr).toBe(0);
+		const parsed = JSON.parse(after.stdout) as {
+			perfDelta?: {
+				cls: { delta: number };
+				bundleBytes: {
+					anchor: number | null;
+					after: number | null;
+					delta: number | null;
+				};
+			};
+			reportPath?: string;
+		};
+		expect(parsed.perfDelta, after.stdout).toBeDefined();
+		expect(parsed.perfDelta?.cls.delta).toBeGreaterThan(0);
+		expect(parsed.perfDelta?.bundleBytes.delta ?? 0).toBeGreaterThan(0);
+
+		// report.html carries the Performance panel.
+		const reportHtml = fs.readFileSync(parsed.reportPath as string, "utf8");
+		expect(reportHtml).toContain("Performance");
+		expect(reportHtml).toContain("Δbundle_bytes");
+
+		// perf_samples has rows.
+		const q = dbg("q", "SELECT COUNT(*) AS c FROM perf_samples", "--json");
+		expect(q.exitCode, q.stdout + q.stderr).toBe(0);
+		const count = Number(
+			(JSON.parse(q.stdout) as { rows: unknown[][] }).rows[0][0],
+		);
+		expect(count).toBeGreaterThan(0);
+
+		// --skip-perf omits perfDelta.
+		const skip = dbg("after", "baseline", "--skip-perf", "--json");
+		expect(skip.exitCode, skip.stdout + skip.stderr).toBe(0);
+		expect(
+			(JSON.parse(skip.stdout) as { perfDelta?: unknown }).perfDelta,
+		).toBeUndefined();
+
+		// stop; no orphan Chrome.
+		expect(dbg("record", "--stop", "--json").exitCode).toBe(0);
+		const deadline = Date.now() + 5000;
+		while (isAlive(chromePid) && Date.now() < deadline) {
+			await sleep(100);
+		}
+		expect(isAlive(chromePid)).toBe(false);
+	});
 });
 
 describe.runIf(!hasChrome)("Plan X — perf flight recorder (no Chrome)", () => {

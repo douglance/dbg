@@ -54,10 +54,7 @@ interface CdpClient extends EventEmitter {
 	Runtime: {
 		enable(): Promise<void>;
 		disable(): Promise<void>;
-		evaluate(params: {
-			expression: string;
-			returnByValue?: boolean;
-		}): Promise<{
+		evaluate(params: { expression: string; returnByValue?: boolean }): Promise<{
 			result: {
 				type: string;
 				value?: unknown;

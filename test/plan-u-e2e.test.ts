@@ -168,89 +168,85 @@ describe.runIf(hasChrome)("Plan U e2e — unified causal chain", () => {
 		}
 	});
 
-	it(
-		"one timeline SQL query returns prompt → edit → capture → error in ts order",
-		{ timeout: 120000 },
-		async () => {
-			// ── record.start ──
-			const start = dbg(
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--idle",
-				"500",
-				"--json",
-			);
-			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
-			expect((JSON.parse(start.stdout) as { ok: boolean }).ok).toBe(true);
-			await sleep(1500); // initial page settle
+	it("one timeline SQL query returns prompt → edit → capture → error in ts order", {
+		timeout: 120000,
+	}, async () => {
+		// ── record.start ──
+		const start = dbg(
+			"record",
+			fixtureUrl,
+			"--viewport",
+			"800x600",
+			"--idle",
+			"500",
+			"--json",
+		);
+		expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+		expect((JSON.parse(start.stdout) as { ok: boolean }).ok).toBe(true);
+		await sleep(1500); // initial page settle
 
-			// ── save a watched file → edits row (+ next-capture annotation) ──
-			fs.writeFileSync(path.join(workDir, "Cart.tsx"), "// coupon field\n");
-			await sleep(500);
+		// ── save a watched file → edits row (+ next-capture annotation) ──
+		fs.writeFileSync(path.join(workDir, "Cart.tsx"), "// coupon field\n");
+		await sleep(500);
 
-			// ── DOM mutation → capture AFTER the edit ──
-			const mut = dbg(
-				"e",
-				"document.body.append(Object.assign(document.createElement('h2'),{textContent:'coupon'})); 'ok'",
-			);
-			expect(mut.exitCode, mut.stdout + mut.stderr).toBe(0);
-			await sleep(2500);
+		// ── DOM mutation → capture AFTER the edit ──
+		const mut = dbg(
+			"e",
+			"document.body.append(Object.assign(document.createElement('h2'),{textContent:'coupon'})); 'ok'",
+		);
+		expect(mut.exitCode, mut.stdout + mut.stderr).toBe(0);
+		await sleep(2500);
 
-			// ── console.error AFTER the capture ──
-			const err = dbg("e", "console.error('coupon-broke'); 'ok'");
-			expect(err.exitCode, err.stdout + err.stderr).toBe(0);
-			await sleep(1200);
+		// ── console.error AFTER the capture ──
+		const err = dbg("e", "console.error('coupon-broke'); 'ok'");
+		expect(err.exitCode, err.stdout + err.stderr).toBe(0);
+		await sleep(1200);
 
-			// ── ONE real SQL query over the unified timeline ──
-			const rows = query(
-				`SELECT ts, kind, label FROM timeline WHERE ts >= ${promptTs} ORDER BY ts`,
-			);
-			const kinds = new Set(rows.map((r) => String(r.kind)));
-			for (const required of ["prompt", "edit", "capture", "error"]) {
-				expect(kinds.has(required), `missing kind ${required}`).toBe(true);
-			}
+		// ── ONE real SQL query over the unified timeline ──
+		const rows = query(
+			`SELECT ts, kind, label FROM timeline WHERE ts >= ${promptTs} ORDER BY ts`,
+		);
+		const kinds = new Set(rows.map((r) => String(r.kind)));
+		for (const required of ["prompt", "edit", "capture", "error"]) {
+			expect(kinds.has(required), `missing kind ${required}`).toBe(true);
+		}
 
-			const firstTs = (kind: string): number =>
-				Number(rows.find((r) => r.kind === kind)?.ts);
-			const pTs = firstTs("prompt");
-			const eTs = firstTs("edit");
-			const errTs = firstTs("error");
-			// prompt (seeded 10s ago) precedes the edit, which precedes the error.
-			expect(pTs).toBeLessThan(eTs);
-			expect(eTs).toBeLessThan(errTs);
-			// a capture exists between the edit and the error (the mutation frame).
-			const capBetween = rows.some(
-				(r) =>
-					r.kind === "capture" && Number(r.ts) >= eTs && Number(r.ts) <= errTs,
-			);
-			expect(capBetween).toBe(true);
-			// the seeded prompt text surfaced as a timeline label.
-			expect(rows.some((r) => String(r.label).includes("coupon"))).toBe(true);
+		const firstTs = (kind: string): number =>
+			Number(rows.find((r) => r.kind === kind)?.ts);
+		const pTs = firstTs("prompt");
+		const eTs = firstTs("edit");
+		const errTs = firstTs("error");
+		// prompt (seeded 10s ago) precedes the edit, which precedes the error.
+		expect(pTs).toBeLessThan(eTs);
+		expect(eTs).toBeLessThan(errTs);
+		// a capture exists between the edit and the error (the mutation frame).
+		const capBetween = rows.some(
+			(r) =>
+				r.kind === "capture" && Number(r.ts) >= eTs && Number(r.ts) <= errTs,
+		);
+		expect(capBetween).toBe(true);
+		// the seeded prompt text surfaced as a timeline label.
+		expect(rows.some((r) => String(r.label).includes("coupon"))).toBe(true);
 
-			// ── edits are a first-class table too ──
-			const edits = query(
-				"SELECT path FROM edits WHERE session_id = 'recorder'",
-			);
-			expect(edits.some((e) => String(e.path).includes("Cart.tsx"))).toBe(true);
+		// ── edits are a first-class table too ──
+		const edits = query("SELECT path FROM edits WHERE session_id = 'recorder'");
+		expect(edits.some((e) => String(e.path).includes("Cart.tsx"))).toBe(true);
 
-			// ── dbg timeline HTML contains a commit chip ──
-			const timeline = dbg("timeline", "--json");
-			expect(timeline.exitCode, timeline.stdout + timeline.stderr).toBe(0);
-			const msg = (JSON.parse(timeline.stdout) as { messages?: string[] })
-				.messages?.[0];
-			expect(msg).toBeDefined();
-			const htmlPath = String(msg).split(": ").pop() as string;
-			const html = fs.readFileSync(htmlPath.trim(), "utf8");
-			expect(html).toContain("marker commit");
-			expect(html).toContain("coupon");
+		// ── dbg timeline HTML contains a commit chip ──
+		const timeline = dbg("timeline", "--json");
+		expect(timeline.exitCode, timeline.stdout + timeline.stderr).toBe(0);
+		const msg = (JSON.parse(timeline.stdout) as { messages?: string[] })
+			.messages?.[0];
+		expect(msg).toBeDefined();
+		const htmlPath = String(msg).split(": ").pop() as string;
+		const html = fs.readFileSync(htmlPath.trim(), "utf8");
+		expect(html).toContain("marker commit");
+		expect(html).toContain("coupon");
 
-			// ── stop ──
-			const stop = dbg("record", "--stop", "--json");
-			expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
-		},
-	);
+		// ── stop ──
+		const stop = dbg("record", "--stop", "--json");
+		expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
+	});
 });
 
 describe.runIf(!hasChrome)("Plan U e2e (no Chrome)", () => {

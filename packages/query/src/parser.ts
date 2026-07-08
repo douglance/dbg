@@ -188,11 +188,11 @@ class Parser {
 		this.advance(); // COUNT
 		this.advance(); // (
 		const star = this.advance();
-		if (!star || star.type !== "star") {
+		if (star?.type !== "star") {
 			throw new Error("Expected '*' in COUNT(*)");
 		}
 		const closing = this.advance();
-		if (!closing || closing.type !== "rparen") {
+		if (closing?.type !== "rparen") {
 			throw new Error("Expected ')' after COUNT(*");
 		}
 		return true;
@@ -210,14 +210,14 @@ class Parser {
 
 	private expectKeyword(kw: string): void {
 		const t = this.advance();
-		if (!t || t.type !== "keyword" || t.value !== kw) {
+		if (t?.type !== "keyword" || t.value !== kw) {
 			throw new Error(`Expected keyword '${kw}', got '${t?.value ?? "EOF"}'`);
 		}
 	}
 
 	private expectIdent(): string {
 		const t = this.advance();
-		if (!t || t.type !== "ident") {
+		if (t?.type !== "ident") {
 			throw new Error(`Expected identifier, got '${t?.value ?? "EOF"}'`);
 		}
 		return t.value;
@@ -271,7 +271,7 @@ class Parser {
 			this.advance();
 			const expr = this.parseOrExpr();
 			const closing = this.advance();
-			if (!closing || closing.type !== "rparen") {
+			if (closing?.type !== "rparen") {
 				throw new Error("Expected closing parenthesis");
 			}
 			return { type: "paren", expr };
@@ -334,7 +334,7 @@ class Parser {
 		if (this.peek()?.type === "keyword" && this.peek()?.value === "LIMIT") {
 			this.advance();
 			const t = this.advance();
-			if (!t || t.type !== "number") {
+			if (t?.type !== "number") {
 				throw new Error(
 					`Expected number after LIMIT, got '${t?.value ?? "EOF"}'`,
 				);

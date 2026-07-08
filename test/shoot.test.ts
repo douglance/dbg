@@ -141,82 +141,72 @@ describe.runIf(hasChrome)("dbg shoot — URLs (e2e)", () => {
 		}
 	});
 
-	it(
-		"viewport preset produces a PNG with the preset's dimensions",
-		{ timeout: 120000 },
-		() => {
-			const response = shoot(
-				fixtureUrl,
-				"--viewport",
-				"mobile",
-				"--name",
-				"mobileshot",
-			);
-			const shotPath = (response.shots ?? [])[0].path;
-			// default output dir + default state = bare name
-			expect(
-				shotPath.endsWith(path.join(".dbg", "shots", "mobileshot.png")),
-			).toBe(true);
-			const png = PNG.sync.read(fs.readFileSync(shotPath));
-			expect(png.width).toBe(390);
-			expect(png.height).toBe(844);
-		},
-	);
+	it("viewport preset produces a PNG with the preset's dimensions", {
+		timeout: 120000,
+	}, () => {
+		const response = shoot(
+			fixtureUrl,
+			"--viewport",
+			"mobile",
+			"--name",
+			"mobileshot",
+		);
+		const shotPath = (response.shots ?? [])[0].path;
+		// default output dir + default state = bare name
+		expect(
+			shotPath.endsWith(path.join(".dbg", "shots", "mobileshot.png")),
+		).toBe(true);
+		const png = PNG.sync.read(fs.readFileSync(shotPath));
+		expect(png.width).toBe(390);
+		expect(png.height).toBe(844);
+	});
 
-	it(
-		"--selector clips to the element (smaller than the viewport)",
-		{ timeout: 120000 },
-		() => {
-			const response = shoot(
-				fixtureUrl,
-				"--selector",
-				"button",
-				"--name",
-				"clipped",
-			);
-			const png = PNG.sync.read(
-				fs.readFileSync((response.shots ?? [])[0].path),
-			);
-			expect(png.width).toBeLessThan(1280);
-			expect(png.height).toBeLessThan(800);
-		},
-	);
+	it("--selector clips to the element (smaller than the viewport)", {
+		timeout: 120000,
+	}, () => {
+		const response = shoot(
+			fixtureUrl,
+			"--selector",
+			"button",
+			"--name",
+			"clipped",
+		);
+		const png = PNG.sync.read(fs.readFileSync((response.shots ?? [])[0].path));
+		expect(png.width).toBeLessThan(1280);
+		expect(png.height).toBeLessThan(800);
+	});
 
-	it(
-		"--states hover: the @hover PNG differs from the base",
-		{ timeout: 120000 },
-		() => {
-			const response = shoot(
-				fixtureUrl,
-				"--selector",
-				"button",
-				"--states",
-				"hover",
-				"--name",
-				"hoverbtn",
-			);
-			expect(response.shots?.map((s) => s.state)).toEqual(["default", "hover"]);
-			const [base, hover] = response.shots ?? [];
-			expect(hover.path.endsWith("hoverbtn@hover.png")).toBe(true);
-			const diff = diffPngs(
-				fs.readFileSync(base.path),
-				fs.readFileSync(hover.path),
-			);
-			expect(diff.diffPixels).toBeGreaterThan(0);
-		},
-	);
+	it("--states hover: the @hover PNG differs from the base", {
+		timeout: 120000,
+	}, () => {
+		const response = shoot(
+			fixtureUrl,
+			"--selector",
+			"button",
+			"--states",
+			"hover",
+			"--name",
+			"hoverbtn",
+		);
+		expect(response.shots?.map((s) => s.state)).toEqual(["default", "hover"]);
+		const [base, hover] = response.shots ?? [];
+		expect(hover.path.endsWith("hoverbtn@hover.png")).toBe(true);
+		const diff = diffPngs(
+			fs.readFileSync(base.path),
+			fs.readFileSync(hover.path),
+		);
+		expect(diff.diffPixels).toBeGreaterThan(0);
+	});
 
-	it(
-		"file:// targets are URL shoots, not harness lookups",
-		{ timeout: 120000 },
-		() => {
-			const fileUrl = `file://${path.join(fs.realpathSync(serveDir), "index.html")}`;
-			const response = shoot(fileUrl, "--name", "filefixture");
-			expect(response.ok).toBe(true);
-			const png = fs.readFileSync((response.shots ?? [])[0].path);
-			expect(Array.from(png.subarray(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
-		},
-	);
+	it("file:// targets are URL shoots, not harness lookups", {
+		timeout: 120000,
+	}, () => {
+		const fileUrl = `file://${path.join(fs.realpathSync(serveDir), "index.html")}`;
+		const response = shoot(fileUrl, "--name", "filefixture");
+		expect(response.ok).toBe(true);
+		const png = fs.readFileSync((response.shots ?? [])[0].path);
+		expect(Array.from(png.subarray(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
+	});
 
 	it("shots land as captures rows under session 'shoot'", () => {
 		const rows = dbg(

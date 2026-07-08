@@ -117,7 +117,7 @@ function killDaemon(): void {
 	}
 }
 
-function killProcessOnPort(port: number): void {
+function _killProcessOnPort(port: number): void {
 	try {
 		// macOS: find and kill process on port
 		const result = execFileSync("lsof", ["-ti", `tcp:${port}`], {

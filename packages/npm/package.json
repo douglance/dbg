@@ -5,14 +5,20 @@
 	"license": "MIT",
 	"type": "module",
 	"bin": {
-		"dbg": "./bin/dbg"
+		"dbg": "bin/dbg"
 	},
-	"files": ["bin", "dist", "README.md", "LICENSE"],
+	"files": [
+		"bin",
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
 	"engines": {
 		"node": ">=22"
 	},
 	"dependencies": {
-		"chrome-remote-interface": "^0.33.2"
+		"@douglance/play": "^0.2.0",
+		"chrome-remote-interface": "^0.34.0"
 	},
 	"scripts": {
 		"build": "node scripts/build.mjs",

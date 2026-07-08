@@ -143,106 +143,98 @@ describe.runIf(hasChrome)("component blame + style diff (e2e)", () => {
 		}
 	});
 
-	it(
-		"blames ColorCard and reports its padding/color delta",
-		{ timeout: 120000 },
-		async () => {
-			const start = dbg(
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--json",
-			);
-			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
-			const chromePid = (
-				JSON.parse(start.stdout) as { recording?: { pid?: number } }
-			).recording?.pid as number;
-			expect(chromePid).toBeGreaterThan(0);
+	it("blames ColorCard and reports its padding/color delta", {
+		timeout: 120000,
+	}, async () => {
+		const start = dbg("record", fixtureUrl, "--viewport", "800x600", "--json");
+		expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+		const chromePid = (
+			JSON.parse(start.stdout) as { recording?: { pid?: number } }
+		).recording?.pid as number;
+		expect(chromePid).toBeGreaterThan(0);
 
-			// Let React render + the post-render mutation capture settle, so the
-			// baseline capture (last before the mark) has the rendered card.
-			await sleep(2500);
-			const mark = dbg("mark", "before-change", "--json");
-			expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
+		// Let React render + the post-render mutation capture settle, so the
+		// baseline capture (last before the mark) has the rendered card.
+		await sleep(2500);
+		const mark = dbg("mark", "before-change", "--json");
+		expect(mark.exitCode, mark.stdout + mark.stderr).toBe(0);
 
-			const mutate = dbg("e", "window.__mutateCard(); 'ok'");
-			expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
-			await sleep(2500);
+		const mutate = dbg("e", "window.__mutateCard(); 'ok'");
+		expect(mutate.exitCode, mutate.stdout + mutate.stderr).toBe(0);
+		await sleep(2500);
 
-			const after = dbg("after", "--json");
-			expect(after.exitCode, after.stdout + after.stderr).toBe(0);
-			const response = JSON.parse(after.stdout) as {
-				ok: boolean;
-				pair?: { diffPercent: number };
-				regions?: Array<{
-					label: string;
-					component: string | null;
-					file: string | null;
-					causal: boolean;
-					box: { w: number; h: number };
-				}>;
-				styleChanges?: Array<{
-					selector: string;
-					prop: string;
-					before: string;
-					after: string;
-				}>;
-				reportPath?: string;
-			};
-			expect(response.ok, after.stdout).toBe(true);
-			expect(response.pair?.diffPercent).toBeGreaterThan(0);
+		const after = dbg("after", "--json");
+		expect(after.exitCode, after.stdout + after.stderr).toBe(0);
+		const response = JSON.parse(after.stdout) as {
+			ok: boolean;
+			pair?: { diffPercent: number };
+			regions?: Array<{
+				label: string;
+				component: string | null;
+				file: string | null;
+				causal: boolean;
+				box: { w: number; h: number };
+			}>;
+			styleChanges?: Array<{
+				selector: string;
+				prop: string;
+				before: string;
+				after: string;
+			}>;
+			reportPath?: string;
+		};
+		expect(response.ok, after.stdout).toBe(true);
+		expect(response.pair?.diffPercent).toBeGreaterThan(0);
 
-			// ── blame: at least one region names the ColorCard component ──
-			expect(response.regions?.length).toBeGreaterThan(0);
-			const cardRegion = response.regions?.find(
-				(r) => r.component === "ColorCard",
-			);
-			expect(cardRegion, JSON.stringify(response.regions)).toBeDefined();
+		// ── blame: at least one region names the ColorCard component ──
+		expect(response.regions?.length).toBeGreaterThan(0);
+		const cardRegion = response.regions?.find(
+			(r) => r.component === "ColorCard",
+		);
+		expect(cardRegion, JSON.stringify(response.regions)).toBeDefined();
 
-			// ── style diff: padding or color delta on the card ──
-			const cardChanges = (response.styleChanges ?? []).filter((c) =>
-				c.selector.includes("color-card"),
-			);
-			expect(
-				cardChanges.some(
-					(c) =>
-						c.prop.startsWith("padding") ||
-						c.prop === "color" ||
-						c.prop === "background-color",
-				),
-				JSON.stringify(response.styleChanges),
-			).toBe(true);
-			const padding = cardChanges.find((c) => c.prop === "padding-top");
-			expect(padding?.before).toBe("8px");
-			expect(padding?.after).toBe("40px");
+		// ── style diff: padding or color delta on the card ──
+		const cardChanges = (response.styleChanges ?? []).filter((c) =>
+			c.selector.includes("color-card"),
+		);
+		expect(
+			cardChanges.some(
+				(c) =>
+					c.prop.startsWith("padding") ||
+					c.prop === "color" ||
+					c.prop === "background-color",
+			),
+			JSON.stringify(response.styleChanges),
+		).toBe(true);
+		const padding = cardChanges.find((c) => c.prop === "padding-top");
+		expect(padding?.before).toBe("8px");
+		expect(padding?.after).toBe("40px");
 
-			// ── report labels the region ──
-			const html = fs.readFileSync(response.reportPath as string, "utf8");
-			expect(html).toContain("ColorCard");
+		// ── report labels the region ──
+		const html = fs.readFileSync(response.reportPath as string, "utf8");
+		expect(html).toContain("ColorCard");
 
-			// ── regions rows queryable ──
-			const regions = dbg(
-				"q",
-				"SELECT diff_id, component FROM regions",
-				"--json",
-			);
-			expect(regions.exitCode, regions.stdout + regions.stderr).toBe(0);
-			const regionRows = (JSON.parse(regions.stdout) as { rows: unknown[][] })
-				.rows;
-			expect(regionRows.length).toBeGreaterThan(0);
-			expect(regionRows.some((r) => r[1] === "ColorCard")).toBe(true);
+		// ── regions rows queryable ──
+		const regions = dbg(
+			"q",
+			"SELECT diff_id, component FROM regions",
+			"--json",
+		);
+		expect(regions.exitCode, regions.stdout + regions.stderr).toBe(0);
+		const regionRows = (JSON.parse(regions.stdout) as { rows: unknown[][] })
+			.rows;
+		expect(regionRows.length).toBeGreaterThan(0);
+		expect(regionRows.some((r) => r[1] === "ColorCard")).toBe(true);
 
-			// ── stop; no orphan Chrome ──
-			const stop = dbg("record", "--stop", "--json");
-			expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
-			const deadline = Date.now() + 5000;
-			while (isAlive(chromePid) && Date.now() < deadline) {
-				await sleep(100);
-			}
-			expect(isAlive(chromePid)).toBe(false);
-		},
-	);
+		// ── stop; no orphan Chrome ──
+		const stop = dbg("record", "--stop", "--json");
+		expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
+		const deadline = Date.now() + 5000;
+		while (isAlive(chromePid) && Date.now() < deadline) {
+			await sleep(100);
+		}
+		expect(isAlive(chromePid)).toBe(false);
+	});
 });
 
 describe.runIf(!hasChrome)("component blame (no Chrome)", () => {

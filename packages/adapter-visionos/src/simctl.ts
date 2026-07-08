@@ -82,7 +82,7 @@ export function parsePsPid(output: string, bundleId: string): number | null {
 
 	for (const rawLine of output.split(/\r?\n/)) {
 		const line = rawLine.trim();
-		if (!line || !line.includes(normalizedBundleId)) {
+		if (!line?.includes(normalizedBundleId)) {
 			continue;
 		}
 

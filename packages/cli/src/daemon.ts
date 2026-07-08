@@ -44,6 +44,7 @@ import type {
 	CssCoverageEntry,
 	DaemonState,
 	DebugExecutor,
+	FlowRunResult,
 	JsCoverageScript,
 	Response,
 	Session,
@@ -118,8 +119,16 @@ import {
 	type WhyCandidates,
 	type WhyVerdict,
 } from "./recorder/why.js";
+import { parseFlowAction } from "./flow-model.js";
+import {
+	replayClick,
+	replayInput,
+	replayKeypress,
+	replayScroll,
+	waitForActionable,
+} from "./flow-replay.js";
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as http from "node:http";
 import * as os from "node:os";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -196,7 +205,7 @@ function asCdpExecutor(session: Session): CdpClientWrapper | null {
 		: null;
 }
 
-function asDapExecutor(session: Session): DapClientWrapper | null {
+function _asDapExecutor(session: Session): DapClientWrapper | null {
 	return session.executor.protocol === "dap"
 		? (session.executor as DapClientWrapper)
 		: null;
@@ -355,6 +364,78 @@ const PERF_OBSERVER_SOURCE = `(() => {
 	addEventListener('pagehide', flush);
 })();`;
 
+const FLOW_BINDING = "__dbg_flow__";
+const FLOW_LISTENER_SOURCE = `(() => {
+	if (window.__dbg_flow_installed__) return;
+	window.__dbg_flow_installed__ = true;
+	const cssEscape = (value) => {
+		if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+		return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\\\$&');
+	};
+	const unique = (selector) => {
+		try { return document.querySelectorAll(selector).length === 1; } catch (_e) { return false; }
+	};
+	const nthPath = (el) => {
+		const parts = [];
+		let cur = el;
+		while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
+			const tag = cur.tagName.toLowerCase();
+			if (cur === document.body) { parts.unshift('body'); break; }
+			let n = 1;
+			let sib = cur;
+			while ((sib = sib.previousElementSibling)) {
+				if (sib.tagName === cur.tagName) n++;
+			}
+			parts.unshift(tag + ':nth-of-type(' + n + ')');
+			cur = cur.parentElement;
+		}
+		return parts.length ? parts.join(' > ') : '';
+	};
+	const sel = (target) => {
+		const el = target && target.nodeType === 1 ? target : target && target.parentElement;
+		if (!el || !el.tagName) return { selector: null, fallbackPath: null };
+		const fallbackPath = nthPath(el);
+		if (el.id) {
+			const idSel = '#' + cssEscape(el.id);
+			if (unique(idSel)) return { selector: idSel, fallbackPath };
+		}
+		const testId = el.getAttribute && el.getAttribute('data-testid');
+		if (testId) {
+			const testSel = '[data-testid="' + String(testId).replace(/"/g, '\\\\"') + '"]';
+			if (unique(testSel)) return { selector: testSel, fallbackPath };
+		}
+		if (el.classList && el.classList.length) {
+			const classSel = el.tagName.toLowerCase() + Array.from(el.classList).map((c) => '.' + cssEscape(c)).join('');
+			if (unique(classSel)) return { selector: classSel, fallbackPath };
+		}
+		return { selector: fallbackPath, fallbackPath };
+	};
+	const send = (action) => {
+		try { window.${FLOW_BINDING}(JSON.stringify(action)); } catch (_e) {}
+	};
+	addEventListener('click', (e) => {
+		const s = sel(e.target);
+		send({ kind: 'click', selector: s.selector, fallbackPath: s.fallbackPath });
+	}, true);
+	addEventListener('change', (e) => {
+		const s = sel(e.target);
+		send({ kind: 'input', selector: s.selector, fallbackPath: s.fallbackPath, value: e.target && 'value' in e.target ? String(e.target.value) : '' });
+	}, true);
+	addEventListener('keydown', (e) => {
+		if (!['Enter','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) return;
+		const s = sel(e.target);
+		send({ kind: 'keypress', selector: s.selector, fallbackPath: s.fallbackPath, value: e.key });
+	}, true);
+	let scrollTimer = null;
+	addEventListener('scroll', () => {
+		if (scrollTimer !== null) clearTimeout(scrollTimer);
+		scrollTimer = setTimeout(() => {
+			scrollTimer = null;
+			send({ kind: 'scroll', value: String(window.scrollY || 0) });
+		}, 250);
+	}, true);
+})();`;
+
 // Documented Performance.getMetrics subset stored per capture.
 const CAPTURE_METRIC_NAMES = new Set([
 	"JSHeapUsedSize",
@@ -405,6 +486,8 @@ interface RecorderState {
 	resourceTypeById: Map<string, string>;
 	// nav_id → cumulative Script/Stylesheet encoded bytes for that navigation.
 	navBundleBytes: Map<number, number>;
+	// Plan Y: active user-flow recording state.
+	flowRecording: { flowId: number; order: number } | null;
 }
 
 let recorder: RecorderState | null = null;
@@ -1613,6 +1696,14 @@ async function handleRecordStart(
 		} catch {
 			// non-fatal: perf samples simply won't be collected
 		}
+		try {
+			await cdp.send("Runtime.addBinding", { name: FLOW_BINDING });
+			await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+				source: FLOW_LISTENER_SOURCE,
+			});
+		} catch {
+			// non-fatal until a flow recording is explicitly started
+		}
 		// Plan V: accessibility tree access for per-capture a11y issues.
 		try {
 			await cdp.send("Accessibility.enable", {});
@@ -1635,13 +1726,43 @@ async function handleRecordStart(
 				} catch {
 					// perf ingestion is best-effort
 				}
+				return;
+			}
+			if (p.name === FLOW_BINDING) {
+				const r = recorder;
+				if (!r?.flowRecording) return;
+				const action = parseFlowAction(p.payload ?? "");
+				if (!action) return;
+				store.insertFlowStep({
+					flowId: r.flowRecording.flowId,
+					idx: r.flowRecording.order++,
+					kind: action.kind,
+					selector: action.selector,
+					fallbackPath: action.fallbackPath,
+					value: action.value,
+					detail: null,
+				});
 			}
 		});
 		rawClient?.on("Page.frameNavigated", (params: unknown) => {
-			const p = params as { frame?: { parentId?: string } };
+			const p = params as { frame?: { parentId?: string; url?: string } };
+			if (!p.frame) return;
 			if (p.frame?.parentId) return; // main frame only
 			// Plan X: bump nav_id at nav so post-nav perf entries get the new id.
-			if (recorder) recorder.navId += 1;
+			if (recorder) {
+				recorder.navId += 1;
+				if (recorder.flowRecording && p.frame.url) {
+					store.insertFlowStep({
+						flowId: recorder.flowRecording.flowId,
+						idx: recorder.flowRecording.order++,
+						kind: "nav",
+						selector: null,
+						fallbackPath: null,
+						value: p.frame.url,
+						detail: null,
+					});
+				}
+			}
 			void onRecorderNavigated();
 		});
 		rawClient?.on("Network.webSocketFrameReceived", (params: unknown) => {
@@ -1721,6 +1842,7 @@ async function handleRecordStart(
 			navId: 1,
 			resourceTypeById: new Map(),
 			navBundleBytes: new Map(),
+			flowRecording: null,
 		};
 		pendingChrome = null;
 
@@ -2526,7 +2648,7 @@ function persistedErrors(): Array<{ ts: number; text: string; stack: string }> {
 			);
 		} else if (row.method === "Log.entryAdded") {
 			const entry = event.entry as Record<string, unknown> | undefined;
-			if (!entry || entry.level !== "error") continue;
+			if (entry?.level !== "error") continue;
 			add(ts, String(entry.text ?? ""), String(entry.url ?? ""));
 		} else if (row.method === "Runtime.exceptionThrown") {
 			const ed = event.exceptionDetails as Record<string, unknown> | undefined;
@@ -2735,6 +2857,370 @@ function handleTapHits(id: number, tail?: number): Response {
 		columns: ["ts", "value"],
 		rows: rows.map((r) => [r.ts, r.value]),
 	};
+}
+
+function latestFlowByName(name: string): Record<string, unknown> | null {
+	const rows = store.query(
+		"SELECT id, ts, name, url, session_id FROM flows WHERE name = ? ORDER BY id DESC LIMIT 1",
+		[name],
+	);
+	return rows[0] ?? null;
+}
+
+async function handleFlowRecord(name: string, url?: string): Promise<Response> {
+	const r = recorder;
+	if (!r) {
+		return {
+			ok: false,
+			error: "recording is not running; start dbg record first",
+		};
+	}
+	if (r.flowRecording) {
+		return { ok: false, error: "flow recording already active; stop it first" };
+	}
+	const session = registry.sessions.get(r.sessionName);
+	const cdp = session ? asCdpExecutor(session) : null;
+	if (!session || !cdp) {
+		return { ok: false, error: "recorder session is not connected" };
+	}
+	if (!name.trim()) return { ok: false, error: "flow name required" };
+	if (url) {
+		const nav = (await cdp.send("Page.navigate", { url })) as {
+			errorText?: string;
+		};
+		if (nav.errorText)
+			return { ok: false, error: `navigation failed: ${nav.errorText}` };
+		await waitForPageLoad(cdp, 10000);
+	}
+	const flowUrl = await currentRecorderUrl(cdp, url ?? r.urls[0]);
+	const flowId = store.insertFlow({
+		name,
+		url: flowUrl,
+		sessionId: r.sessionName,
+	});
+	r.flowRecording = { flowId, order: 0 };
+	return {
+		ok: true,
+		columns: ["id", "name", "url"],
+		rows: [[flowId, name, flowUrl]],
+		messages: [`recording flow ${name}`],
+	};
+}
+
+async function currentRecorderUrl(
+	cdp: CdpClientWrapper,
+	fallback: string,
+): Promise<string> {
+	try {
+		const result = (await cdp.send("Runtime.evaluate", {
+			expression: "location.href",
+			returnByValue: true,
+		})) as { result?: { value?: unknown } };
+		if (typeof result.result?.value === "string") return result.result.value;
+	} catch {
+		// fallback below
+	}
+	return fallback;
+}
+
+function handleFlowStop(): Response {
+	const r = recorder;
+	if (!r?.flowRecording) {
+		return { ok: false, error: "no flow recording is active" };
+	}
+	const flowId = r.flowRecording.flowId;
+	r.flowRecording = null;
+	const rows = store.query(
+		"SELECT COUNT(*) AS c FROM flow_steps WHERE flow_id = ?",
+		[flowId],
+	);
+	return {
+		ok: true,
+		messages: [`flow recording stopped (${Number(rows[0]?.c ?? 0)} steps)`],
+	};
+}
+
+function handleFlowList(): Response {
+	const rows = store
+		.query(
+			`SELECT f.id, f.name, f.url, f.ts, COUNT(s.id) AS steps
+			 FROM flows f
+			 LEFT JOIN flow_steps s ON s.flow_id = f.id
+			 GROUP BY f.id
+			 ORDER BY f.id DESC`,
+		)
+		.map((r) => [r.id, r.name, r.url, r.steps, r.ts]);
+	return {
+		ok: true,
+		columns: ["id", "name", "url", "steps", "ts"],
+		rows,
+		messages: [`${rows.length} flows`],
+	};
+}
+
+function handleFlowShow(name: string): Response {
+	const flow = latestFlowByName(name);
+	if (!flow) return { ok: false, error: `flow not found: ${name}` };
+	const rows = store
+		.query(
+			`SELECT id, idx, kind, selector, fallback_path, value
+			 FROM flow_steps WHERE flow_id = ? ORDER BY idx`,
+			[flow.id],
+		)
+		.map((r) => [r.id, r.idx, r.kind, r.selector, r.fallback_path, r.value]);
+	return {
+		ok: true,
+		columns: ["id", "idx", "kind", "selector", "fallback_path", "value"],
+		rows,
+		messages: [`flow ${name}: ${rows.length} steps`],
+	};
+}
+
+interface FlowStepRow {
+	id: number;
+	idx: number;
+	kind: string;
+	selector: string | null;
+	fallbackPath: string | null;
+	value: string | null;
+}
+
+async function handleFlowRun(
+	name: string,
+	stepTimeoutMs = 5000,
+): Promise<Response> {
+	const r = recorder;
+	if (!r) {
+		return {
+			ok: false,
+			error: "recording is not running; start dbg record first",
+		};
+	}
+	const session = registry.sessions.get(r.sessionName);
+	const cdp = session ? asCdpExecutor(session) : null;
+	if (!session || !cdp) {
+		return { ok: false, error: "recorder session is not connected" };
+	}
+	const flow = latestFlowByName(name);
+	if (!flow) return { ok: false, error: `flow not found: ${name}` };
+	const flowId = Number(flow.id);
+	const flowUrl = String(flow.url ?? "");
+	const steps: FlowStepRow[] = store
+		.query(
+			`SELECT id, idx, kind, selector, fallback_path, value
+			 FROM flow_steps WHERE flow_id = ? ORDER BY idx`,
+			[flowId],
+		)
+		.map((row) => ({
+			id: Number(row.id),
+			idx: Number(row.idx),
+			kind: String(row.kind),
+			selector: row.selector == null ? null : String(row.selector),
+			fallbackPath:
+				row.fallback_path == null ? null : String(row.fallback_path),
+			value: row.value == null ? null : String(row.value),
+		}));
+	if (steps.length === 0)
+		return { ok: false, error: `flow has no steps: ${name}` };
+
+	r.flowRecording = null;
+	const nav = (await cdp.send("Page.navigate", { url: flowUrl })) as {
+		errorText?: string;
+	};
+	if (nav.errorText)
+		return { ok: false, error: `navigation failed: ${nav.errorText}` };
+	await waitForPageLoad(cdp, 10000);
+
+	const runId = store.insertFlowRun({
+		flowId,
+		status: "running",
+		stepsTotal: steps.length,
+		stepsPassed: 0,
+	});
+	const resultSteps: FlowRunResult["steps"] = [];
+	const newErrors: FlowRunResult["newErrors"] = [];
+	let stepsPassed = 0;
+	let failed = false;
+
+	for (let i = 0; i < steps.length; i++) {
+		const step = steps[i];
+		if (failed) {
+			store.insertFlowRunStep({
+				runId,
+				stepId: step.id,
+				idx: step.idx,
+				kind: step.kind,
+				status: "skipped",
+			});
+			resultSteps.push({
+				idx: step.idx,
+				kind: step.kind,
+				selector: step.selector,
+				status: "skipped",
+				captureId: null,
+				error: null,
+				diffPercent: null,
+			});
+			continue;
+		}
+
+		const stepStartTs = Date.now();
+		let status = "passed";
+		let error: string | null = null;
+		let captureId: number | null = null;
+		let diffPercent: number | null = null;
+		try {
+			if (requiresActionableElement(step.kind)) {
+				const ready = await waitForActionable(
+					cdp,
+					step.selector,
+					step.fallbackPath,
+					stepTimeoutMs,
+				);
+				if (!ready.ready) {
+					throw new Error(
+						`readiness timeout: ${ready.selector ?? step.selector ?? step.fallbackPath ?? "(no selector)"} not actionable (${ready.reason})`,
+					);
+				}
+			}
+			await executeFlowStep(cdp, step);
+			await new Promise((resolve) => setTimeout(resolve, 500));
+		} catch (e) {
+			status = "failed";
+			error = (e as Error).message;
+			failed = true;
+		}
+
+		const frame = await forceRecorderCapture(session);
+		captureId = frame?.id ?? null;
+		for (const entry of consoleDeltaSince(session, stepStartTs).errors) {
+			newErrors.push(entry);
+		}
+		if (captureId != null) {
+			diffPercent = diffPercentAgainstPreviousRun(step.id, runId, captureId);
+		}
+		store.insertFlowRunStep({
+			runId,
+			stepId: step.id,
+			idx: step.idx,
+			kind: step.kind,
+			status,
+			captureId,
+			error,
+			diffPercent,
+		});
+		if (status === "passed") stepsPassed++;
+		resultSteps.push({
+			idx: step.idx,
+			kind: step.kind,
+			selector: step.selector,
+			status,
+			captureId,
+			error,
+			diffPercent,
+		});
+	}
+
+	const status = failed ? "failed" : "passed";
+	store.run("UPDATE flow_runs SET status = ?, steps_passed = ? WHERE id = ?", [
+		status,
+		stepsPassed,
+		runId,
+	]);
+	const flowRun: FlowRunResult = {
+		runId,
+		flowName: name,
+		status,
+		stepsTotal: steps.length,
+		stepsPassed,
+		stepsFailed: resultSteps.filter((s) => s.status === "failed").length,
+		newErrors,
+		steps: resultSteps,
+	};
+	return {
+		ok: true,
+		flowRun,
+		messages: [
+			`flow ${name}: ${stepsPassed}/${steps.length} steps passed`,
+			...resultSteps
+				.filter((s) => s.status === "failed")
+				.map((s) => `step ${s.idx} ${s.kind} failed: ${s.error}`),
+		],
+	};
+}
+
+function requiresActionableElement(kind: string): boolean {
+	return kind === "click" || kind === "input" || kind === "keypress";
+}
+
+async function executeFlowStep(
+	cdp: DebugExecutor,
+	step: FlowStepRow,
+): Promise<void> {
+	switch (step.kind) {
+		case "click":
+			await replayClick(cdp, step.selector, step.fallbackPath);
+			return;
+		case "input":
+			await replayInput(
+				cdp,
+				step.selector,
+				step.fallbackPath,
+				step.value ?? "",
+			);
+			return;
+		case "keypress":
+			await replayKeypress(
+				cdp,
+				step.selector,
+				step.fallbackPath,
+				step.value ?? "",
+			);
+			return;
+		case "scroll":
+			await replayScroll(cdp, step.value ?? "0");
+			return;
+		case "nav": {
+			const nav = (await cdp.send("Page.navigate", {
+				url: step.value ?? "",
+			})) as { errorText?: string };
+			if (nav.errorText) throw new Error(`navigation failed: ${nav.errorText}`);
+			await waitForPageLoad(cdp as CdpClientWrapper, 10000);
+			return;
+		}
+		default:
+			throw new Error(`unsupported flow step kind: ${step.kind}`);
+	}
+}
+
+function diffPercentAgainstPreviousRun(
+	stepId: number,
+	currentRunId: number,
+	captureId: number,
+): number | null {
+	const prev = store.query(
+		`SELECT capture_id FROM flow_run_steps
+		 WHERE step_id = ? AND run_id != ? AND capture_id IS NOT NULL
+		 ORDER BY id DESC LIMIT 1`,
+		[stepId, currentRunId],
+	)[0];
+	if (!prev?.capture_id) return null;
+	const prevPath = capturePngPath(Number(prev.capture_id));
+	const currentPath = capturePngPath(captureId);
+	if (!prevPath || !currentPath) return null;
+	try {
+		return diffPngs(fs.readFileSync(prevPath), fs.readFileSync(currentPath))
+			.diffPercent;
+	} catch {
+		return null;
+	}
+}
+
+function capturePngPath(captureId: number): string | null {
+	const row = store.query("SELECT png_path FROM captures WHERE id = ?", [
+		captureId,
+	])[0];
+	return row?.png_path == null ? null : String(row.png_path);
 }
 
 const TIMELINE_DEFAULT_LIMIT = 100;
@@ -4079,6 +4565,16 @@ async function dispatch(cmd: Command): Promise<Response> {
 			return handleTapHits(cmd.id, cmd.tail);
 		case "tap.rm":
 			return handleTapRm(cmd.id);
+		case "flow.record":
+			return handleFlowRecord(cmd.name, cmd.url);
+		case "flow.stop":
+			return handleFlowStop();
+		case "flow.list":
+			return handleFlowList();
+		case "flow.show":
+			return handleFlowShow(cmd.name);
+		case "flow.run":
+			return handleFlowRun(cmd.name, cmd.stepTimeoutMs);
 	}
 
 	// Session-scoped commands share an optional `session` field.

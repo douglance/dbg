@@ -14,7 +14,7 @@ const { DatabaseSync } = require(SQLITE_MODULE) as {
 // on a version mismatch (or an unreadable schema) the known tables are dropped
 // and rebuilt rather than migrated — a dbg upgrade must never crash on an
 // existing DB.
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 const KNOWN_TABLES = [
 	"events",
@@ -28,6 +28,10 @@ const KNOWN_TABLES = [
 	"taps",
 	"tap_hits",
 	"perf_samples",
+	"flows",
+	"flow_steps",
+	"flow_runs",
+	"flow_run_steps",
 ];
 
 export interface EventRecord {
@@ -128,6 +132,42 @@ export interface TapHitRecord {
 	value: string;
 }
 
+export interface FlowRecord {
+	ts?: number;
+	name: string;
+	url: string;
+	sessionId: string;
+}
+
+export interface FlowStepRecord {
+	flowId: number;
+	idx: number;
+	kind: string;
+	selector?: string | null;
+	fallbackPath?: string | null;
+	value?: string | null;
+	detail?: string | null;
+}
+
+export interface FlowRunRecord {
+	ts?: number;
+	flowId: number;
+	status: string;
+	stepsTotal: number;
+	stepsPassed: number;
+}
+
+export interface FlowRunStepRecord {
+	runId: number;
+	stepId: number;
+	idx: number;
+	kind: string;
+	status: string;
+	captureId?: number | null;
+	error?: string | null;
+	diffPercent?: number | null;
+}
+
 export interface RegionRecord {
 	diffId: number;
 	x: number;
@@ -161,6 +201,10 @@ export class EventStore {
 	private insertPerfSampleStmt!: StatementSync;
 	private insertTapStmt!: StatementSync;
 	private insertTapHitStmt!: StatementSync;
+	private insertFlowStmt!: StatementSync;
+	private insertFlowStepStmt!: StatementSync;
+	private insertFlowRunStmt!: StatementSync;
+	private insertFlowRunStepStmt!: StatementSync;
 	private pending: PendingEvent[] = [];
 	private flushTimer: NodeJS.Timeout;
 	private closed = false;
@@ -392,6 +436,63 @@ export class EventStore {
 		this.db.exec(
 			"CREATE INDEX IF NOT EXISTS idx_tap_hits_tap_id ON tap_hits(tap_id)",
 		);
+
+		// Plan Y flows: recorded user actions and replay verdicts. Kept as
+		// durable metadata for repeatable regression checks.
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS flows (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				name TEXT NOT NULL,
+				url TEXT NOT NULL,
+				session_id TEXT NOT NULL
+			)
+		`);
+		this.db.exec("CREATE INDEX IF NOT EXISTS idx_flows_name ON flows(name)");
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS flow_steps (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				flow_id INTEGER NOT NULL,
+				idx INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				selector TEXT,
+				fallback_path TEXT,
+				value TEXT,
+				detail TEXT
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_flow_steps_flow_id ON flow_steps(flow_id)",
+		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS flow_runs (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				ts INTEGER NOT NULL,
+				flow_id INTEGER NOT NULL,
+				status TEXT NOT NULL,
+				steps_total INTEGER NOT NULL,
+				steps_passed INTEGER NOT NULL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_flow_runs_flow_id ON flow_runs(flow_id)",
+		);
+		this.db.exec(`
+			CREATE TABLE IF NOT EXISTS flow_run_steps (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				run_id INTEGER NOT NULL,
+				step_id INTEGER NOT NULL,
+				idx INTEGER NOT NULL,
+				kind TEXT NOT NULL,
+				status TEXT NOT NULL,
+				capture_id INTEGER,
+				error TEXT,
+				diff_percent REAL
+			)
+		`);
+		this.db.exec(
+			"CREATE INDEX IF NOT EXISTS idx_flow_run_steps_run_id ON flow_run_steps(run_id)",
+		);
 	}
 
 	private prepareStatements(): void {
@@ -431,6 +532,21 @@ export class EventStore {
 		);
 		this.insertTapHitStmt = this.db.prepare(
 			"INSERT INTO tap_hits (tap_id, ts, value) VALUES (?, ?, ?)",
+		);
+		this.insertFlowStmt = this.db.prepare(
+			"INSERT INTO flows (ts, name, url, session_id) VALUES (?, ?, ?, ?)",
+		);
+		this.insertFlowStepStmt = this.db.prepare(
+			`INSERT INTO flow_steps (flow_id, idx, kind, selector, fallback_path, value, detail)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		);
+		this.insertFlowRunStmt = this.db.prepare(
+			`INSERT INTO flow_runs (ts, flow_id, status, steps_total, steps_passed)
+			 VALUES (?, ?, ?, ?, ?)`,
+		);
+		this.insertFlowRunStepStmt = this.db.prepare(
+			`INSERT INTO flow_run_steps (run_id, step_id, idx, kind, status, capture_id, error, diff_percent)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 	}
 
@@ -629,6 +745,62 @@ export class EventStore {
 			hit.tapId,
 			hit.ts ?? Date.now(),
 			hit.value,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a named recorded flow; returns its id (-1 if closed). */
+	insertFlow(flow: FlowRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertFlowStmt.run(
+			flow.ts ?? Date.now(),
+			flow.name,
+			flow.url,
+			flow.sessionId,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a recorded flow step; returns its id (-1 if closed). */
+	insertFlowStep(step: FlowStepRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertFlowStepStmt.run(
+			step.flowId,
+			step.idx,
+			step.kind,
+			step.selector ?? null,
+			step.fallbackPath ?? null,
+			step.value ?? null,
+			step.detail ?? null,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a flow replay run; returns its id (-1 if closed). */
+	insertFlowRun(run: FlowRunRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertFlowRunStmt.run(
+			run.ts ?? Date.now(),
+			run.flowId,
+			run.status,
+			run.stepsTotal,
+			run.stepsPassed,
+		);
+		return Number(result.lastInsertRowid);
+	}
+
+	/** Insert a per-step flow replay verdict; returns its id (-1 if closed). */
+	insertFlowRunStep(step: FlowRunStepRecord): number {
+		if (this.closed) return -1;
+		const result = this.insertFlowRunStepStmt.run(
+			step.runId,
+			step.stepId,
+			step.idx,
+			step.kind,
+			step.status,
+			step.captureId ?? null,
+			step.error ?? null,
+			step.diffPercent ?? null,
 		);
 		return Number(result.lastInsertRowid);
 	}

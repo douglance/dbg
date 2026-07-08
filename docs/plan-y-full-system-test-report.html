@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>dbg Plan Y Full-System Test Report</title>
+	<style>
+		:root {
+			color-scheme: light;
+			--bg: #f7f8fb;
+			--panel: #ffffff;
+			--ink: #172033;
+			--muted: #586276;
+			--line: #d9deea;
+			--accent: #0f766e;
+			--accent-2: #1d4ed8;
+			--bad: #b42318;
+			--good: #067647;
+			--code: #111827;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			background: var(--bg);
+			color: var(--ink);
+			font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+		}
+		header {
+			background: #111827;
+			color: #fff;
+			padding: 32px clamp(20px, 4vw, 56px);
+		}
+		header h1 {
+			margin: 0 0 8px;
+			font-size: clamp(28px, 4vw, 44px);
+			line-height: 1.05;
+			letter-spacing: 0;
+		}
+		header p { margin: 0; max-width: 980px; color: #d1d5db; }
+		main {
+			max-width: 1180px;
+			margin: 0 auto;
+			padding: 28px clamp(16px, 3vw, 32px) 56px;
+		}
+		section {
+			background: var(--panel);
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			padding: 22px;
+			margin: 0 0 18px;
+		}
+		h2 { margin: 0 0 14px; font-size: 22px; }
+		h3 { margin: 22px 0 8px; font-size: 16px; }
+		p { margin: 8px 0; }
+		.grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+			gap: 12px;
+		}
+		.metric {
+			border: 1px solid var(--line);
+			border-radius: 8px;
+			padding: 14px;
+			background: #fbfcff;
+		}
+		.metric .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+		.metric .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+		.good { color: var(--good); }
+		.bad { color: var(--bad); }
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			margin: 12px 0;
+			font-size: 13px;
+		}
+		th, td {
+			border-bottom: 1px solid var(--line);
+			text-align: left;
+			vertical-align: top;
+			padding: 9px 8px;
+		}
+		th { background: #f2f5fa; font-weight: 650; }
+		code {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			background: #eef2f7;
+			padding: 1px 4px;
+			border-radius: 4px;
+		}
+		pre {
+			margin: 10px 0 0;
+			padding: 14px;
+			background: var(--code);
+			color: #e5e7eb;
+			border-radius: 8px;
+			overflow: auto;
+			font-size: 12px;
+			line-height: 1.45;
+		}
+		.flow {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			gap: 10px;
+			margin: 14px 0;
+		}
+		.step {
+			border: 1px solid var(--line);
+			border-left: 4px solid var(--accent-2);
+			border-radius: 8px;
+			padding: 12px;
+			background: #fbfcff;
+		}
+		.step strong { display: block; margin-bottom: 4px; }
+		.badge {
+			display: inline-block;
+			border-radius: 999px;
+			padding: 2px 8px;
+			font-size: 12px;
+			font-weight: 650;
+			background: #dcfce7;
+			color: #166534;
+		}
+		.badge.fail {
+			background: #fee2e2;
+			color: #991b1b;
+		}
+		.note { color: var(--muted); }
+	</style>
+</head>
+<body>
+	<header>
+		<h1>dbg Plan Y Full-System Test Report</h1>
+		<p>Generated July 7, 2026 from the local checkout at <code>/Users/douglance/Developer/lv/dbg</code>. This report explains the flow recording/replay system and records the data collected while testing the full package path.</p>
+	</header>
+	<main>
+		<section>
+			<h2>Executive Result</h2>
+			<div class="grid">
+				<div class="metric"><div class="label">Full CI</div><div class="value good">Passed</div><p>49 test files, 348 passing tests, 12 skipped.</p></div>
+				<div class="metric"><div class="label">Publish Dry Run</div><div class="value good">Passed</div><p>8 files, 1.2 MB tarball, public package dry-run.</p></div>
+				<div class="metric"><div class="label">Live Flow Smoke</div><div class="value good">Passed</div><p>3 recorded steps, 1 passed run, 1 expected failed run.</p></div>
+				<div class="metric"><div class="label">Perf Budget</div><div class="value good">Passed</div><p><code>record=1386ms</code>, <code>after=317ms</code>, <code>shoot=1677ms</code>.</p></div>
+			</div>
+			<p>No publish-blocking issue remains in the tested path. The npm dry-run had no bin warning after the executable bit and <code>bin</code> path fix.</p>
+		</section>
+
+		<section>
+			<h2>How The System Works</h2>
+			<div class="flow">
+				<div class="step"><strong>1. Record Page</strong><code>dbg record &lt;url&gt;</code><p>Starts managed headless Chrome, opens the recorder session, installs mutation/perf/flow bindings, and stores captures in SQLite plus blobs on disk.</p></div>
+				<div class="step"><strong>2. Record Flow</strong><code>dbg flow record &lt;name&gt; [--url]</code><p>Optionally navigates to the flow URL, then listens for capture-phase click, change, keydown, scroll, and navigation actions through <code>__dbg_flow__</code>.</p></div>
+				<div class="step"><strong>3. Persist Steps</strong><code>flow_steps</code><p>Each action is stored with <code>kind</code>, selector, fallback path, value, and index. Selector priority is unique id, data-testid, unique class selector, then nth-of-type path.</p></div>
+				<div class="step"><strong>4. Replay Flow</strong><code>dbg flow run &lt;name&gt;</code><p>Starts from the flow URL, waits until each target is visible and hit-testable, replays trusted CDP input, captures after every step, and stores verdicts.</p></div>
+				<div class="step"><strong>5. Query Evidence</strong><code>dbg q</code><p><code>flows</code>, <code>flow_steps</code>, <code>flow_runs</code>, and <code>flow_run_steps</code> expose the whole process to SQL and downstream automation.</p></div>
+			</div>
+		</section>
+
+		<section>
+			<h2>Commands Run</h2>
+			<table>
+				<thead><tr><th>Command</th><th>Purpose</th><th>Result</th></tr></thead>
+				<tbody>
+					<tr><td><code>pnpm run ci</code></td><td>Full build, lint, format check, type check, and complete Vitest suite.</td><td><span class="badge">passed</span></td></tr>
+					<tr><td><code>npm publish --dry-run --access public</code></td><td>Publish packaging check from <code>packages/npm</code>.</td><td><span class="badge">passed</span></td></tr>
+					<tr><td><code>node packages/cli/dist/cli.js flow --help</code></td><td>Verify shipped CLI surface for flow commands.</td><td><span class="badge">passed</span></td></tr>
+					<tr><td>Live smoke script</td><td>Start fixture server, record a flow, replay once successfully, break the page, replay failure, query tables.</td><td><span class="badge">passed</span></td></tr>
+				</tbody>
+			</table>
+		</section>
+
+		<section>
+			<h2>Full CI Data</h2>
+			<table>
+				<thead><tr><th>Suite</th><th>Observed Data</th></tr></thead>
+				<tbody>
+					<tr><td>Final summary</td><td><code>Test Files 49 passed (49)</code>; <code>Tests 348 passed | 12 skipped (360)</code>; duration <code>221.61s</code>.</td></tr>
+					<tr><td>Plan Y e2e</td><td><code>test/plan-y-e2e.test.ts</code>: 2 tests, 1 skipped; main flow test passed in <code>17507ms</code>.</td></tr>
+					<tr><td>Perf budget</td><td><code>record=1386ms mark=175ms mutation->capture=360ms after=317ms timeline=321ms shoot=1677ms</code>.</td></tr>
+					<tr><td>Integration</td><td><code>test/integration.test.ts</code>: 21 tests passed in <code>57389ms</code>.</td></tr>
+					<tr><td>Plan W</td><td>Page taps and node taps passed; confirms tap sentinel suppression still works.</td></tr>
+					<tr><td>Plan X</td><td>Perf flight recorder e2e passed; CLS and bundle-byte deltas still report.</td></tr>
+					<tr><td>Plan U/V and recorder</td><td>Timeline SQL, verdicts, retention, after/replay, blame, shoot, daemon race, and recorder integration suites passed.</td></tr>
+				</tbody>
+			</table>
+			<pre>pnpm run ci
+$ pnpm run lint && pnpm run format:check && pnpm run check && pnpm run test
+$ biome lint --error-on-warnings packages test
+Checked 210 files in 99ms. No fixes applied.
+$ biome format --error-on-warnings packages test
+Checked 210 files in 68ms. No fixes applied.
+$ tsc --noEmit
+$ pnpm run build && vitest run
+
+Test Files  49 passed (49)
+Tests       348 passed | 12 skipped (360)
+Duration    221.61s</pre>
+		</section>
+
+		<section>
+			<h2>Publish Dry-Run Data</h2>
+			<table>
+				<thead><tr><th>Field</th><th>Value</th></tr></thead>
+				<tbody>
+					<tr><td>Package</td><td><code>@douglance/dbg@0.4.0</code></td></tr>
+					<tr><td>Tarball</td><td><code>douglance-dbg-0.4.0.tgz</code></td></tr>
+					<tr><td>Package size</td><td><code>1.2 MB</code></td></tr>
+					<tr><td>Unpacked size</td><td><code>6.2 MB</code></td></tr>
+					<tr><td>Total files</td><td><code>8</code></td></tr>
+					<tr><td>Integrity</td><td><code>sha512-l1K255y+nqiLA[...]4n0ecBXm1KJog==</code></td></tr>
+				</tbody>
+			</table>
+			<pre>npm publish --dry-run --access public
+npm notice Tarball Contents
+1.1kB LICENSE
+23.0kB README.md
+46B bin/dbg
+1.6MB dist/cli.js
+2.9MB dist/cli.js.map
+574.2kB dist/daemon.js
+1.1MB dist/daemon.js.map
+500B package.json
+npm notice Publishing to https://registry.npmjs.org/ with tag latest and public access (dry-run)
++ @douglance/dbg@0.4.0</pre>
+		</section>
+
+		<section>
+			<h2>CLI Surface Data</h2>
+			<pre>dbg flow — Recorded flows: record &lt;name&gt; [--url] | stop | run &lt;name&gt; [--step-timeout] | list | show &lt;name&gt;
+
+Usage: dbg flow &lt;action&gt; [name] [options]
+
+Arguments:
+  action  record | stop | run | list | show
+  name    Flow name
+
+Options:
+  --url &lt;string&gt;           Start URL for record
+  --step-timeout &lt;number&gt;  Per-step readiness timeout in ms (run; default 5000)</pre>
+		</section>
+
+		<section>
+			<h2>Live Smoke: Scenario</h2>
+			<p>The live smoke used <code>test/fixtures/form-server.js</code> and an isolated daemon socket, event DB, and Chrome profile. It verified that <code>flow record --url</code> navigates to the requested URL, records three actions, replays them successfully, then reports a readiness failure after the submit button is removed.</p>
+			<table>
+				<thead><tr><th>Measurement</th><th>Value</th></tr></thead>
+				<tbody>
+					<tr><td>Fixture URL</td><td><code>http://127.0.0.1:59132/</code></td></tr>
+					<tr><td>Flow URL</td><td><code>http://127.0.0.1:59132/?case=report</code></td></tr>
+					<tr><td>Recorded flow</td><td><code>report-flow</code></td></tr>
+					<tr><td>Recorded steps</td><td><code>3</code>: click <code>#name</code>, input <code>#name</code>, click <code>#submit</code></td></tr>
+					<tr><td>Run 1</td><td><span class="badge">passed</span> 3/3 steps</td></tr>
+					<tr><td>Run 2</td><td><span class="badge fail">failed as expected</span> submit readiness timeout</td></tr>
+					<tr><td>SQL counts</td><td><code>flows=1</code>, <code>flow_steps=3</code>, <code>flow_runs=2</code>, <code>flow_run_steps=6</code></td></tr>
+				</tbody>
+			</table>
+		</section>
+
+		<section>
+			<h2>Live Smoke: Raw JSON Data</h2>
+			<h3>Recorder Start</h3>
+			<pre>{
+  "ok": true,
+  "s": "recorder",
+  "pid": 60680,
+  "messages": [
+    "recording http://127.0.0.1:59132/ (chrome pid 60680, port 59136)",
+    "frame 1 saved to /Users/douglance/Developer/lv/dbg/.dbg/recordings/recorder/blobs/74c99d11184bc8c3.png"
+  ],
+  "recording": {
+    "running": true,
+    "pid": 60680,
+    "port": 59136,
+    "urls": ["http://127.0.0.1:59132/"],
+    "frameCount": 1,
+    "session": "recorder"
+  }
+}</pre>
+			<h3>Flow Record And URL Proof</h3>
+			<pre>{
+  "ok": true,
+  "columns": ["id", "name", "url"],
+  "rows": [[1, "report-flow", "http://127.0.0.1:59132/?case=report"]],
+  "messages": ["recording flow report-flow"]
+}
+
+{
+  "ok": true,
+  "value": "http://127.0.0.1:59132/?case=report",
+  "type": "string"
+}</pre>
+			<h3>Recorded Steps</h3>
+			<pre>{
+  "ok": true,
+  "columns": ["id", "idx", "kind", "selector", "fallback_path", "value"],
+  "rows": [
+    [1, 0, "click", "#name", "body > form:nth-of-type(1) > input:nth-of-type(1)", null],
+    [2, 1, "input", "#name", "body > form:nth-of-type(1) > input:nth-of-type(1)", "hello-report"],
+    [3, 2, "click", "#submit", "body > form:nth-of-type(1) > button:nth-of-type(1)", null]
+  ],
+  "messages": ["flow report-flow: 3 steps"]
+}</pre>
+			<h3>Run 1: Passing Replay</h3>
+			<pre>{
+  "ok": true,
+  "flowRun": {
+    "runId": 1,
+    "flowName": "report-flow",
+    "status": "passed",
+    "stepsTotal": 3,
+    "stepsPassed": 3,
+    "stepsFailed": 0,
+    "newErrors": [],
+    "steps": [
+      {"idx": 0, "kind": "click", "selector": "#name", "status": "passed", "captureId": 3, "error": null, "diffPercent": null},
+      {"idx": 1, "kind": "input", "selector": "#name", "status": "passed", "captureId": 4, "error": null, "diffPercent": null},
+      {"idx": 2, "kind": "click", "selector": "#submit", "status": "passed", "captureId": 5, "error": null, "diffPercent": null}
+    ]
+  },
+  "messages": ["flow report-flow: 3/3 steps passed"]
+}</pre>
+			<h3>Run 2: Expected Readiness Failure</h3>
+			<pre>{
+  "ok": true,
+  "flowRun": {
+    "runId": 2,
+    "flowName": "report-flow",
+    "status": "failed",
+    "stepsTotal": 3,
+    "stepsPassed": 2,
+    "stepsFailed": 1,
+    "newErrors": [],
+    "steps": [
+      {"idx": 0, "kind": "click", "selector": "#name", "status": "passed", "captureId": 7, "error": null, "diffPercent": 0.03694678534763823},
+      {"idx": 1, "kind": "input", "selector": "#name", "status": "passed", "captureId": 8, "error": null, "diffPercent": 0.03694678534763823},
+      {"idx": 2, "kind": "click", "selector": "#submit", "status": "failed", "captureId": 9, "error": "readiness timeout: #submit not actionable (not found)", "diffPercent": 0.2261932965557699}
+    ]
+  },
+  "messages": [
+    "flow report-flow: 2/3 steps passed",
+    "step 2 click failed: readiness timeout: #submit not actionable (not found)"
+  ]
+}</pre>
+			<h3>SQL Table Counts</h3>
+			<pre>SELECT COUNT(*) AS flows FROM flows       => 1
+SELECT COUNT(*) AS steps FROM flow_steps  => 3
+SELECT COUNT(*) AS runs FROM flow_runs    => 2
+SELECT COUNT(*) AS run_steps FROM flow_run_steps => 6
+
+SELECT status, steps_total, steps_passed FROM flow_runs ORDER BY id
+passed | 3 | 3
+failed | 3 | 2</pre>
+			<h3>Recorder Stop</h3>
+			<pre>{
+  "ok": true,
+  "messages": ["recording stopped (chrome pid 60680 killed)"],
+  "recording": {"running": false}
+}</pre>
+		</section>
+
+		<section>
+			<h2>Interpretation</h2>
+			<p>The data proves the complete path: packaged CLI command registration, daemon command dispatch, in-page flow binding, selector capture, SQLite persistence, replay readiness checks, CDP input execution, per-step captures, diff calculation against prior runs, SQL table exposure, and expected failure reporting.</p>
+			<p>The second replay intentionally failed after the fixture removed <code>#submit</code>. That is the important failure mode: the system did not click an absent element or silently continue. It captured the failing state, persisted the failed row, and reported <code>readiness timeout: #submit not actionable (not found)</code>.</p>
+			<p class="note">All commands were run against the local checkout. The live smoke used temporary socket, database, and Chrome profile paths and cleaned them up after the run.</p>
+		</section>
+	</main>
+</body>
+</html>

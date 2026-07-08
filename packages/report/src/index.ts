@@ -620,9 +620,9 @@ export function renderTimeline(input: TimelineInput): string {
 	// Merge frames and commit/prompt markers into one ts-ordered strip. Frames
 	// keep their original 0-based index for the "frame N (capture:ID)" label.
 	const entries: Array<{ ts: number; order: number; html: string }> = [];
-	input.frames.forEach((f, i) =>
-		entries.push({ ts: f.ts, order: 0, html: renderFrame(f, i) }),
-	);
+	input.frames.forEach((f, i) => {
+		entries.push({ ts: f.ts, order: 0, html: renderFrame(f, i) });
+	});
 	for (const commit of input.commits ?? []) {
 		entries.push({ ts: commit.ts, order: 1, html: renderCommitChip(commit) });
 	}

@@ -29,8 +29,9 @@
 		"@dbg/tables-native": "workspace:*",
 		"@dbg/tables-recorder": "workspace:*",
 		"@dbg/types": "workspace:*",
-		"esbuild": "^0.25.0",
-		"incur": "^0.4.3"
+		"@douglance/play": "^0.2.0",
+		"esbuild": "^0.28.1",
+		"incur": "^0.4.11"
 	},
 	"scripts": {
 		"build": "tsc -p tsconfig.json"

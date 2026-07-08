@@ -63,6 +63,34 @@ script load" when no matching script is loaded yet — never silently pending. T
 `__dbg_tap:` console sentinel is routed to `tap_hits` and suppressed from the
 user-facing console, `after` consoleDelta, `dbg why`, and the timeline.
 
+### Flows (Record and Replay)
+
+Flows record user actions on the active visual recorder page and replay them
+with trusted CDP input, per-step readiness gates, captures, console verdicts,
+and diff-vs-last-run data.
+
+```sh
+dbg record http://localhost:3000
+dbg flow record checkout
+dbg flow stop
+dbg flow run checkout --step-timeout 5000
+dbg flow list
+dbg flow show checkout
+dbg q "SELECT * FROM flow_run_steps"
+```
+
+Selector capture prefers unique `#id`, then `[data-testid]`, then a unique
+tag/class selector, then a full `nth-of-type` fallback path.
+Scroll-only flows are valid: recording a user scroll or `window.scrollTo(...)`
+persists a `scroll` step and replays it against static `file://` reports as
+well as app pages.
+
+Use `dbg` for CDP-backed debugger state, flight-recorder verdicts, SQL tables,
+and replayable flows. The CLI package installs `@douglance/play` as a normal
+dependency, so general Playwright-runner workflows with durable named sessions,
+accessibility snapshots, and smart selector helpers are available without
+depending on ad hoc global setup.
+
 ### Control Execution
 
 ```sh
@@ -403,6 +431,10 @@ agent history all join on `ts` directly.
 | `a11y_issues` | Per-capture accessibility issues (`capture_id`, `rule`, `selector`, `detail`) | recorder store |
 | `taps` | Logpoints (`id`, `session_id`, `file`, `line`, `expr`, `url_regex`, `enabled`) | debug store |
 | `tap_hits` | Each tap fire (`tap_id`, `ts`, `value`) | debug store |
+| `flows` | Recorded user flows (`id`, `ts`, `name`, `url`, `session_id`) | recorder store |
+| `flow_steps` | Recorded flow actions (`flow_id`, `idx`, `kind`, `selector`, `fallback_path`, `value`) | recorder store |
+| `flow_runs` | Flow replay summaries (`status`, `steps_total`, `steps_passed`) | recorder store |
+| `flow_run_steps` | Per-step replay verdicts (`status`, `capture_id`, `error`, `diff_percent`) | recorder store |
 | `commits` | `git log` (hash, short_hash, ts, author, summary, files); default repo = cwd, override `WHERE repo = '/abs'` (500 most recent) | git |
 | `agent_prompts` | Claude Code prompts (`ts`, `display`, `project`); default-scoped to cwd, `WHERE project = '<slug>'` widens | `~/.claude/history.jsonl` |
 | `agent_sessions` | Per-session transcript summaries (`ts_first`, `ts_last`, `title`, `message_count`) | `~/.claude/projects/<slug>` |

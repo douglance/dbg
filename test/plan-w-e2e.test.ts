@@ -133,63 +133,61 @@ describe.runIf(hasChrome)("Plan W — page taps", () => {
 		fs.rmSync(pProfile, { recursive: true, force: true });
 	});
 
-	it(
-		"tap fires with the expr value; sentinel suppressed from after/why",
-		{ timeout: 120000 },
-		async () => {
-			expect(dbg("record", url, "--json").exitCode).toBe(0);
-			await sleep(1500); // app.js loads
+	it("tap fires with the expr value; sentinel suppressed from after/why", {
+		timeout: 120000,
+	}, async () => {
+		expect(dbg("record", url, "--json").exitCode).toBe(0);
+		await sleep(1500); // app.js loads
 
-			// Arm the tap on app.js:3 (`return doubled`).
-			const add = dbg("tap", "add", "app.js:3", "doubled", "--json");
-			expect(add.exitCode, add.stdout + add.stderr).toBe(0);
-			const addRes = JSON.parse(add.stdout) as {
-				ok: boolean;
-				id?: string;
-				messages?: string[];
-			};
-			expect(addRes.ok).toBe(true);
-			// resolved-location echo
-			expect(addRes.messages?.[0]).toContain("armed on");
-			expect(addRes.messages?.[0]).toContain("app.js:3");
-			const tapId = addRes.id as string;
+		// Arm the tap on app.js:3 (`return doubled`).
+		const add = dbg("tap", "add", "app.js:3", "doubled", "--json");
+		expect(add.exitCode, add.stdout + add.stderr).toBe(0);
+		const addRes = JSON.parse(add.stdout) as {
+			ok: boolean;
+			id?: string;
+			messages?: string[];
+		};
+		expect(addRes.ok).toBe(true);
+		// resolved-location echo
+		expect(addRes.messages?.[0]).toContain("armed on");
+		expect(addRes.messages?.[0]).toContain("app.js:3");
+		const tapId = addRes.id as string;
 
-			expect(dbg("mark", "baseline", "--json").exitCode).toBe(0);
+		expect(dbg("mark", "baseline", "--json").exitCode).toBe(0);
 
-			// Trigger the tap and a real error.
-			expect(dbg("e", "compute(21)").exitCode).toBe(0);
-			await sleep(400);
-			expect(dbg("e", "console.error('real-error-xyz')").exitCode).toBe(0);
-			await sleep(800);
+		// Trigger the tap and a real error.
+		expect(dbg("e", "compute(21)").exitCode).toBe(0);
+		await sleep(400);
+		expect(dbg("e", "console.error('real-error-xyz')").exitCode).toBe(0);
+		await sleep(800);
 
-			// tap_hits carries the expression value (42).
-			const hits = rows(dbg("q", "SELECT value FROM tap_hits", "--json"));
-			expect(hits.map((h) => String(h.value))).toContain("42");
+		// tap_hits carries the expression value (42).
+		const hits = rows(dbg("q", "SELECT value FROM tap_hits", "--json"));
+		expect(hits.map((h) => String(h.value))).toContain("42");
 
-			// `after` consoleDelta has the real error but NOT the sentinel.
-			const after = dbg("after", "baseline", "--json");
-			expect(after.exitCode, after.stdout + after.stderr).toBe(0);
-			expect(after.stdout).toContain("real-error-xyz");
-			expect(after.stdout).not.toContain("__dbg_tap");
+		// `after` consoleDelta has the real error but NOT the sentinel.
+		const after = dbg("after", "baseline", "--json");
+		expect(after.exitCode, after.stdout + after.stderr).toBe(0);
+		expect(after.stdout).toContain("real-error-xyz");
+		expect(after.stdout).not.toContain("__dbg_tap");
 
-			// `dbg why` output does not contain the sentinel.
-			const why = dbg("why", "--json");
-			expect(why.exitCode, why.stdout + why.stderr).toBe(0);
-			expect(why.stdout).not.toContain("__dbg_tap");
+		// `dbg why` output does not contain the sentinel.
+		const why = dbg("why", "--json");
+		expect(why.exitCode, why.stdout + why.stderr).toBe(0);
+		expect(why.stdout).not.toContain("__dbg_tap");
 
-			// tap hits / list / rm.
-			const tapHits = rows(dbg("tap", "hits", tapId, "--json"));
-			expect(tapHits.map((h) => String(h.value))).toContain("42");
-			const list = rows(dbg("tap", "list", "--json"));
-			expect(list.some((t) => String(t.id) === tapId)).toBe(true);
-			expect(dbg("tap", "rm", tapId, "--json").exitCode).toBe(0);
-			expect(
-				rows(dbg("tap", "list", "--json")).some((t) => String(t.id) === tapId),
-			).toBe(false);
+		// tap hits / list / rm.
+		const tapHits = rows(dbg("tap", "hits", tapId, "--json"));
+		expect(tapHits.map((h) => String(h.value))).toContain("42");
+		const list = rows(dbg("tap", "list", "--json"));
+		expect(list.some((t) => String(t.id) === tapId)).toBe(true);
+		expect(dbg("tap", "rm", tapId, "--json").exitCode).toBe(0);
+		expect(
+			rows(dbg("tap", "list", "--json")).some((t) => String(t.id) === tapId),
+		).toBe(false);
 
-			expect(dbg("record", "--stop", "--json").exitCode).toBe(0);
-		},
-	);
+		expect(dbg("record", "--stop", "--json").exitCode).toBe(0);
+	});
 });
 
 // ─── Node target ───
@@ -213,28 +211,26 @@ describe("Plan W — node taps", () => {
 		fs.rmSync(nWork, { recursive: true, force: true });
 	});
 
-	it(
-		"tap on a node target carries the expr value (V8 inspector parity)",
-		{ timeout: 60000 },
-		async () => {
-			const run = dbg("run", `node ${fixture}`);
-			expect(run.exitCode, run.stdout + run.stderr).toBe(0);
-			// --inspect-brk pauses at the first line; continue so the module runs
-			// (defines globalThis.compute) and idles on its keep-alive timer.
-			expect(dbg("c").exitCode).toBe(0);
-			await sleep(400);
+	it("tap on a node target carries the expr value (V8 inspector parity)", {
+		timeout: 60000,
+	}, async () => {
+		const run = dbg("run", `node ${fixture}`);
+		expect(run.exitCode, run.stdout + run.stderr).toBe(0);
+		// --inspect-brk pauses at the first line; continue so the module runs
+		// (defines globalThis.compute) and idles on its keep-alive timer.
+		expect(dbg("c").exitCode).toBe(0);
+		await sleep(400);
 
-			const add = dbg("tap", "add", "tap-node.js:4", "doubled", "--json");
-			expect(add.exitCode, add.stdout + add.stderr).toBe(0);
-			expect((JSON.parse(add.stdout) as { ok: boolean }).ok).toBe(true);
+		const add = dbg("tap", "add", "tap-node.js:4", "doubled", "--json");
+		expect(add.exitCode, add.stdout + add.stderr).toBe(0);
+		expect((JSON.parse(add.stdout) as { ok: boolean }).ok).toBe(true);
 
-			expect(dbg("e", "compute(21)").exitCode).toBe(0);
-			await sleep(500);
+		expect(dbg("e", "compute(21)").exitCode).toBe(0);
+		await sleep(500);
 
-			const hits = rows(dbg("q", "SELECT value FROM tap_hits", "--json"));
-			expect(hits.map((h) => String(h.value))).toContain("42");
+		const hits = rows(dbg("q", "SELECT value FROM tap_hits", "--json"));
+		expect(hits.map((h) => String(h.value))).toContain("42");
 
-			expect(dbg("close").exitCode).toBe(0);
-		},
-	);
+		expect(dbg("close").exitCode).toBe(0);
+	});
 });

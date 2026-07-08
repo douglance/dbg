@@ -124,107 +124,98 @@ describe.runIf(hasChrome)("recorder integration", () => {
 		fs.rmSync(workDir, { recursive: true, force: true });
 	});
 
-	it(
-		"records a fixture page and stops without orphan Chrome",
-		{ timeout: 120000 },
-		async () => {
-			// ── record.start ──
-			const start = dbg(
-				"record",
-				fixtureUrl,
-				"--viewport",
-				"800x600",
-				"--json",
-			);
-			expect(start.exitCode, start.stdout + start.stderr).toBe(0);
-			const startResponse = JSON.parse(start.stdout) as {
-				ok: boolean;
-				recording?: {
-					running: boolean;
-					pid?: number;
-					port?: number;
-					frameCount?: number;
-				};
+	it("records a fixture page and stops without orphan Chrome", {
+		timeout: 120000,
+	}, async () => {
+		// ── record.start ──
+		const start = dbg("record", fixtureUrl, "--viewport", "800x600", "--json");
+		expect(start.exitCode, start.stdout + start.stderr).toBe(0);
+		const startResponse = JSON.parse(start.stdout) as {
+			ok: boolean;
+			recording?: {
+				running: boolean;
+				pid?: number;
+				port?: number;
+				frameCount?: number;
 			};
-			expect(startResponse.ok).toBe(true);
-			expect(startResponse.recording?.running).toBe(true);
-			expect(startResponse.recording?.frameCount).toBeGreaterThanOrEqual(1);
-			const chromePid = startResponse.recording?.pid;
-			expect(chromePid).toBeGreaterThan(0);
-			expect(isAlive(chromePid as number)).toBe(true);
+		};
+		expect(startResponse.ok).toBe(true);
+		expect(startResponse.recording?.running).toBe(true);
+		expect(startResponse.recording?.frameCount).toBeGreaterThanOrEqual(1);
+		const chromePid = startResponse.recording?.pid;
+		expect(chromePid).toBeGreaterThan(0);
+		expect(isAlive(chromePid as number)).toBe(true);
 
-			// ── session appears in dbg ss ──
-			const sessions = dbg("ss", "--json");
-			expect(sessions.exitCode).toBe(0);
-			expect(sessions.stdout).toContain("recorder");
+		// ── session appears in dbg ss ──
+		const sessions = dbg("ss", "--json");
+		expect(sessions.exitCode).toBe(0);
+		expect(sessions.stdout).toContain("recorder");
 
-			// ── record.status ──
-			const status = dbg("record", "--status", "--json");
-			expect(status.exitCode).toBe(0);
-			const statusResponse = JSON.parse(status.stdout) as {
-				recording?: { running: boolean; urls?: string[]; frameCount?: number };
-			};
-			expect(statusResponse.recording?.running).toBe(true);
-			expect(statusResponse.recording?.urls).toEqual([fixtureUrl]);
-			expect(statusResponse.recording?.frameCount).toBeGreaterThanOrEqual(1);
+		// ── record.status ──
+		const status = dbg("record", "--status", "--json");
+		expect(status.exitCode).toBe(0);
+		const statusResponse = JSON.parse(status.stdout) as {
+			recording?: { running: boolean; urls?: string[]; frameCount?: number };
+		};
+		expect(statusResponse.recording?.running).toBe(true);
+		expect(statusResponse.recording?.urls).toEqual([fixtureUrl]);
+		expect(statusResponse.recording?.frameCount).toBeGreaterThanOrEqual(1);
 
-			// ── captures row + PNG on disk with PNG magic bytes ──
-			const rows = dbg("q", "SELECT png_path, url FROM captures", "--json");
-			expect(rows.exitCode, rows.stdout + rows.stderr).toBe(0);
-			const rowsResponse = JSON.parse(rows.stdout) as {
-				rows: unknown[][];
-			};
-			expect(rowsResponse.rows.length).toBeGreaterThanOrEqual(1);
-			const pngPath = rowsResponse.rows[0][0] as string;
-			// The daemon's cwd is the realpath (macOS tmpdir is symlinked).
-			expect(
-				pngPath.startsWith(
-					path.join(fs.realpathSync(workDir), ".dbg", "recordings"),
-				),
-			).toBe(true);
-			const png = fs.readFileSync(pngPath);
-			expect(Array.from(png.subarray(0, 8))).toEqual([
-				0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-			]);
-			expect(rowsResponse.rows[0][1]).toBe(fixtureUrl);
+		// ── captures row + PNG on disk with PNG magic bytes ──
+		const rows = dbg("q", "SELECT png_path, url FROM captures", "--json");
+		expect(rows.exitCode, rows.stdout + rows.stderr).toBe(0);
+		const rowsResponse = JSON.parse(rows.stdout) as {
+			rows: unknown[][];
+		};
+		expect(rowsResponse.rows.length).toBeGreaterThanOrEqual(1);
+		const pngPath = rowsResponse.rows[0][0] as string;
+		// The daemon's cwd is the realpath (macOS tmpdir is symlinked).
+		expect(
+			pngPath.startsWith(
+				path.join(fs.realpathSync(workDir), ".dbg", "recordings"),
+			),
+		).toBe(true);
+		const png = fs.readFileSync(pngPath);
+		expect(Array.from(png.subarray(0, 8))).toEqual([
+			0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+		]);
+		expect(rowsResponse.rows[0][1]).toBe(fixtureUrl);
 
-			// ── COUNT(*) success criterion: captures returns recorder rows ──
-			const count = dbg("q", "SELECT COUNT(*) FROM captures", "--json");
-			expect(count.exitCode, count.stdout + count.stderr).toBe(0);
-			const countResponse = JSON.parse(count.stdout) as { rows: unknown[][] };
-			expect(Number(countResponse.rows[0][0])).toBeGreaterThanOrEqual(1);
-			// legacy stack-frames table remains untouched
-			const legacyCount = dbg("q", "SELECT COUNT(*) FROM frames", "--json");
-			expect(
-				legacyCount.exitCode,
-				legacyCount.stdout + legacyCount.stderr,
-			).toBe(0);
+		// ── COUNT(*) success criterion: captures returns recorder rows ──
+		const count = dbg("q", "SELECT COUNT(*) FROM captures", "--json");
+		expect(count.exitCode, count.stdout + count.stderr).toBe(0);
+		const countResponse = JSON.parse(count.stdout) as { rows: unknown[][] };
+		expect(Number(countResponse.rows[0][0])).toBeGreaterThanOrEqual(1);
+		// legacy stack-frames table remains untouched
+		const legacyCount = dbg("q", "SELECT COUNT(*) FROM frames", "--json");
+		expect(legacyCount.exitCode, legacyCount.stdout + legacyCount.stderr).toBe(
+			0,
+		);
 
-			// ── record.stop kills Chrome ──
-			const stop = dbg("record", "--stop", "--json");
-			expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
-			const stopResponse = JSON.parse(stop.stdout) as {
-				ok: boolean;
-				recording?: { running: boolean };
-			};
-			expect(stopResponse.ok).toBe(true);
-			expect(stopResponse.recording?.running).toBe(false);
+		// ── record.stop kills Chrome ──
+		const stop = dbg("record", "--stop", "--json");
+		expect(stop.exitCode, stop.stdout + stop.stderr).toBe(0);
+		const stopResponse = JSON.parse(stop.stdout) as {
+			ok: boolean;
+			recording?: { running: boolean };
+		};
+		expect(stopResponse.ok).toBe(true);
+		expect(stopResponse.recording?.running).toBe(false);
 
-			// pid must be dead (allow the SIGTERM grace period to elapse)
-			const deadline = Date.now() + 5000;
-			while (isAlive(chromePid as number) && Date.now() < deadline) {
-				await sleep(100);
-			}
-			expect(isAlive(chromePid as number)).toBe(false);
+		// pid must be dead (allow the SIGTERM grace period to elapse)
+		const deadline = Date.now() + 5000;
+		while (isAlive(chromePid as number) && Date.now() < deadline) {
+			await sleep(100);
+		}
+		expect(isAlive(chromePid as number)).toBe(false);
 
-			// status reflects stopped state
-			const finalStatus = dbg("record", "--status", "--json");
-			const finalResponse = JSON.parse(finalStatus.stdout) as {
-				recording?: { running: boolean };
-			};
-			expect(finalResponse.recording?.running).toBe(false);
-		},
-	);
+		// status reflects stopped state
+		const finalStatus = dbg("record", "--status", "--json");
+		const finalResponse = JSON.parse(finalStatus.stdout) as {
+			recording?: { running: boolean };
+		};
+		expect(finalResponse.recording?.running).toBe(false);
+	});
 });
 
 describe.runIf(!hasChrome)("recorder integration (no Chrome)", () => {

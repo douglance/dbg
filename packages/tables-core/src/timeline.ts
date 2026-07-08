@@ -1,4 +1,3 @@
-import type { CdpExecutor } from "@dbg/types";
 import { extractFilterValue } from "./utils.js";
 
 import type { VirtualTable } from "@dbg/query";
