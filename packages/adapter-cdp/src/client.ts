@@ -54,10 +54,7 @@ interface CdpClient extends EventEmitter {
 	Runtime: {
 		enable(): Promise<void>;
 		disable(): Promise<void>;
-		evaluate(params: {
-			expression: string;
-			returnByValue?: boolean;
-		}): Promise<{
+		evaluate(params: { expression: string; returnByValue?: boolean }): Promise<{
 			result: {
 				type: string;
 				value?: unknown;
@@ -78,6 +75,14 @@ interface CdpClient extends EventEmitter {
 export class CdpClientWrapper implements DebugExecutor {
 	readonly protocol = "cdp" as const;
 	readonly capabilities = CDP_CAPABILITIES;
+	// Optional interceptor for incoming CDP events, installed once by the
+	// daemon. Returning true consumes the event: it is NOT recorded to the
+	// store and NOT re-emitted (so state handlers don't see it). Used to route
+	// tap-logpoint console sentinels to tap_hits while suppressing them from
+	// the user-visible console/events sinks (the single choke upstream of both).
+	static eventInterceptor:
+		| ((method: string, eventParams: unknown) => boolean)
+		| null = null;
 	private client: CdpClient | null = null;
 	private state: DebuggerState;
 	private cdpState: CdpState;
@@ -536,6 +541,11 @@ export class CdpClientWrapper implements DebugExecutor {
 			if (typeof eventName === "string" && eventName.includes(".")) {
 				const normalizedMethod = normalizeIncomingEventMethod(eventName);
 				if (normalizedMethod) {
+					// A consumed event (tap sentinel) is dropped before it reaches
+					// either the events store or the in-memory state handlers.
+					if (CdpClientWrapper.eventInterceptor?.(normalizedMethod, args[0])) {
+						return true;
+					}
 					this.recordCdp("cdp_recv", normalizedMethod, { event: args[0] });
 				}
 			}

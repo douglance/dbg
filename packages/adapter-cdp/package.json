@@ -1,6 +1,6 @@
 {
 	"name": "@dbg/adapter-cdp",
-	"version": "0.2.0",
+	"version": "0.4.0",
 	"private": true,
 	"type": "module",
 	"main": "./dist/index.js",
@@ -14,7 +14,7 @@
 	"dependencies": {
 		"@dbg/store": "workspace:*",
 		"@dbg/types": "workspace:*",
-		"chrome-remote-interface": "^0.33.2"
+		"chrome-remote-interface": "^0.34.0"
 	},
 	"scripts": {
 		"build": "tsc -p tsconfig.json"

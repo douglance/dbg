@@ -251,22 +251,6 @@ describe("commands", () => {
 		expect(cdp.send).toHaveBeenCalledWith("Debugger.pause");
 	});
 
-	it("rejects invalid breakpoint arguments", async () => {
-		state.connected = true;
-		await expect(
-			handleSetBreakpoint(cdpClient, state, "main.ts"),
-		).resolves.toEqual({
-			ok: false,
-			error: "expected file:line",
-		});
-		await expect(
-			handleSetBreakpoint(cdpClient, state, "main.ts:abc"),
-		).resolves.toEqual({
-			ok: false,
-			error: "invalid line number",
-		});
-	});
-
 	it("sets breakpoint with matched script and condition", async () => {
 		state.connected = true;
 		state.scripts.set("s1", {
@@ -285,7 +269,9 @@ describe("commands", () => {
 		const result = await handleSetBreakpoint(
 			cdpClient,
 			state,
-			"main.ts:10 if count > 0",
+			"main.ts",
+			10,
+			"count > 0",
 		);
 
 		expect(cdp.send).toHaveBeenCalledWith("Debugger.setBreakpointByUrl", {
@@ -315,7 +301,7 @@ describe("commands", () => {
 			locations: [],
 		});
 
-		await handleSetBreakpoint(cdpClient, state, "foo.ts:3");
+		await handleSetBreakpoint(cdpClient, state, "foo.ts", 3);
 
 		expect(cdp.send).toHaveBeenCalledWith("Debugger.setBreakpointByUrl", {
 			lineNumber: 3,
@@ -454,7 +440,7 @@ describe("commands", () => {
 			value: "0\tzero\n1>\tone\n2\ttwo",
 		});
 
-		const explicit = await handleSource(cdpClient, state, "main.ts 0 1");
+		const explicit = await handleSource(cdpClient, state, "main.ts", 0, 1);
 		expect(explicit).toEqual({
 			ok: true,
 			value: "0\tzero\n1\tone",
@@ -469,12 +455,14 @@ describe("commands", () => {
 			ok: false,
 			error: "not paused; specify file start end",
 		});
-		await expect(handleSource(cdpClient, state, "main.ts 1")).resolves.toEqual({
-			ok: false,
-			error: "expected: file startLine endLine",
-		});
+		await expect(handleSource(cdpClient, state, "main.ts", 1)).resolves.toEqual(
+			{
+				ok: false,
+				error: "expected: file startLine endLine",
+			},
+		);
 		await expect(
-			handleSource(cdpClient, state, "missing.ts 1 2"),
+			handleSource(cdpClient, state, "missing.ts", 1, 2),
 		).resolves.toEqual({
 			ok: false,
 			error: 'no script matching "missing.ts"',

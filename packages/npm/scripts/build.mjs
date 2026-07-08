@@ -39,7 +39,7 @@ await build({
 	bundle: true,
 	splitting: false,
 	sourcemap: true,
-	// Keep CRI as a normal dependency (dynamic import in adapter-cdp).
-	external: ["chrome-remote-interface"],
+	// Keep these as normal dependencies; @douglance/play owns Playwright.
+	external: ["@douglance/play", "chrome-remote-interface"],
 	logLevel: "info",
 });

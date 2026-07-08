@@ -215,32 +215,61 @@ function resolvePhysicalCandidate(
 		);
 	}
 
-	let processes = listProcesses(candidate.identifier);
-	let selectedPid: ReturnType<typeof resolvePhysicalProcessId>;
-	try {
-		selectedPid = resolvePhysicalProcessId(processes, app, request.pid);
-	} catch (error) {
-		if (
-			request.pid === undefined &&
-			request.launch &&
-			error instanceof AppleDeviceProviderError &&
-			error.code === "process_not_running"
-		) {
-			const launched = launchProcess(candidate.identifier, request.bundleId, {
-				terminateExisting: false,
-				startStopped: false,
-			});
-			if (launched.pid !== null) {
-				processes = listProcesses(candidate.identifier);
-				selectedPid = resolvePhysicalProcessId(processes, app, launched.pid);
-			} else {
-				processes = listProcesses(candidate.identifier);
-				selectedPid = resolvePhysicalProcessId(processes, app, request.pid);
-			}
-		} else {
-			throw error;
+	// On physical devices, attaching to an already-running process via
+	// CoreDevice only gives a read-only eStateConnected connection (can't
+	// pause, step, or set breakpoints). Use --launch to relaunch with
+	// --start-stopped which produces a real debuggable session (eStateStopped)
+	// where stepping and breakpoints work.
+	if (request.launch && request.pid === undefined) {
+		const launched = launchProcess(candidate.identifier, request.bundleId, {
+			terminateExisting: true,
+			startStopped: true,
+		});
+
+		if (launched.pid !== null) {
+			return {
+				provider: APPLE_DEVICE_PROVIDER,
+				platform: candidate.platform,
+				deviceId: candidate.identifier,
+				bundleId: request.bundleId,
+				pid: launched.pid,
+				attachProtocol: "dap",
+				metadata: {
+					attachEnvironment: "device",
+					deviceName: candidate.name,
+					appName: app.name,
+					executable: launched.executable ?? "",
+					matchedBy: "pid" as const,
+					startedStopped: true,
+				},
+			};
 		}
+
+		// Launch didn't return a PID — fall back to process list lookup
+		const processes = listProcesses(candidate.identifier);
+		const selectedPid = resolvePhysicalProcessId(processes, app, undefined);
+
+		return {
+			provider: APPLE_DEVICE_PROVIDER,
+			platform: candidate.platform,
+			deviceId: candidate.identifier,
+			bundleId: request.bundleId,
+			pid: selectedPid.pid,
+			attachProtocol: "dap",
+			metadata: {
+				attachEnvironment: "device",
+				deviceName: candidate.name,
+				appName: app.name,
+				executable: selectedPid.executable,
+				matchedBy: selectedPid.matchKind,
+				startedStopped: true,
+			},
+		};
 	}
+
+	// No launch flag or explicit PID override: find existing process directly
+	const processes = listProcesses(candidate.identifier);
+	const selectedPid = resolvePhysicalProcessId(processes, app, request.pid);
 
 	return {
 		provider: APPLE_DEVICE_PROVIDER,
@@ -351,13 +380,7 @@ function resolveCandidates(
 				"device_not_found",
 				`device or simulator '${override.trim()}' not found`,
 				{
-					availableDevices: all.map((candidate) => ({
-						identifier: candidate.identifier,
-						name: candidate.name,
-						kind: candidate.kind,
-						platform: candidate.platform,
-						booted: candidate.booted,
-					})),
+					availableDevices: all.map(describeCandidate),
 				},
 			);
 		}
@@ -365,10 +388,20 @@ function resolveCandidates(
 	}
 
 	const booted = all.filter((candidate) => candidate.booted);
-	if (booted.length > 0) {
-		return sortCandidates(booted);
+	const preferred =
+		booted.length > 0 ? sortCandidates(booted) : sortCandidates(all);
+	if (hasMixedTargetKinds(preferred)) {
+		throw new AppleDeviceProviderError(
+			"ambiguous_device_selection",
+			buildAmbiguousSelectionMessage(platform),
+			{
+				availableDevices: preferred.map(describeCandidate),
+				suggestedCommands: buildDeviceSelectionSuggestions(preferred),
+				hint: 'Specify --device sim:"<name>" or --device device:<udid-or-name> to choose the target environment.',
+			},
+		);
 	}
-	return sortCandidates(all);
+	return preferred;
 }
 
 function listPhysicalCandidates(platform: AttachPlatform): PhysicalCandidate[] {
@@ -636,4 +669,80 @@ function parseDeviceOverride(raw: string): {
 		return { scope: "device", needle: trimmed.slice(idx + 1) };
 	}
 	return { scope: "any", needle: trimmed };
+}
+
+function hasMixedTargetKinds(candidates: AttachCandidate[]): boolean {
+	let sawDevice = false;
+	let sawSimulator = false;
+	for (const candidate of candidates) {
+		if (candidate.kind === "device") {
+			sawDevice = true;
+		} else {
+			sawSimulator = true;
+		}
+		if (sawDevice && sawSimulator) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function buildAmbiguousSelectionMessage(platform: AttachPlatform): string {
+	if (platform === "auto") {
+		return "multiple booted Apple targets found across simulator and physical device; specify --device to avoid attaching to the wrong target";
+	}
+	return `multiple booted ${platform} targets found across simulator and physical device; specify --device to avoid attaching to the wrong target`;
+}
+
+function describeCandidate(
+	candidate: AttachCandidate,
+): Record<string, unknown> {
+	return {
+		identifier: candidate.identifier,
+		name: candidate.name,
+		kind: candidate.kind,
+		platform: candidate.platform,
+		booted: candidate.booted,
+	};
+}
+
+function buildDeviceSelectionSuggestions(
+	candidates: AttachCandidate[],
+): string[] {
+	const suggestions: string[] = [];
+	const simulator = candidates.find(
+		(candidate): candidate is SimulatorCandidate =>
+			candidate.kind === "simulator",
+	);
+	if (simulator) {
+		suggestions.push(
+			`dbg attach <bundle-id> --device sim:${quoteSelectorValue(simulator.name)}`,
+		);
+		suggestions.push(
+			`dbg attach <bundle-id> --device ${quoteSelectorValue(simulator.identifier)}`,
+		);
+	}
+	const device = candidates.find(
+		(candidate): candidate is PhysicalCandidate => candidate.kind === "device",
+	);
+	if (device) {
+		const udid = String(device.device.hardwareProperties?.udid ?? "").trim();
+		if (udid) {
+			suggestions.push(
+				`dbg attach <bundle-id> --device device:${quoteSelectorValue(udid)}`,
+			);
+		}
+		suggestions.push(
+			`dbg attach <bundle-id> --device device:${quoteSelectorValue(device.name)}`,
+		);
+	}
+	return suggestions;
+}
+
+function quoteSelectorValue(value: string): string {
+	if (!value) return value;
+	if (/[\s"]/u.test(value)) {
+		return `"${value.replaceAll('"', '\\"')}"`;
+	}
+	return value;
 }

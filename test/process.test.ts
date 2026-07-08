@@ -1,9 +1,8 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const { mockSpawn, mockCreateServer } = vi.hoisted(() => ({
+const { mockSpawn } = vi.hoisted(() => ({
 	mockSpawn: vi.fn(),
-	mockCreateServer: vi.fn(),
 }));
 
 vi.mock("node:child_process", async () => {
@@ -14,26 +13,7 @@ vi.mock("node:child_process", async () => {
 	};
 });
 
-vi.mock("node:net", async () => {
-	const actual = await vi.importActual("node:net");
-	return {
-		...actual,
-		createServer: mockCreateServer,
-	};
-});
-
 import { killTarget, spawnTarget } from "../packages/cli/src/process.js";
-
-function setupFreePort(port: number): void {
-	const server = new EventEmitter() as any;
-	server.listen = vi.fn((_port: number, _host: string, cb: () => void) => cb());
-	server.address = vi.fn(() => ({ port }));
-	server.close = vi.fn((cb: () => void) => cb());
-	server.on = vi.fn(
-		(_event: string, _handler: (...args: unknown[]) => void) => server,
-	);
-	mockCreateServer.mockReturnValue(server);
-}
 
 function createChild(): any {
 	const child = new EventEmitter() as any;
@@ -54,8 +34,7 @@ describe("process helpers", () => {
 		await expect(spawnTarget("   ")).rejects.toThrow("empty command");
 	});
 
-	it("injects inspect-brk and strips user inspect flags", async () => {
-		setupFreePort(4555);
+	it("injects inspect-brk=0 and strips user inspect flags", async () => {
 		const child = createChild();
 		mockSpawn.mockReturnValue(child);
 
@@ -67,9 +46,10 @@ describe("process helpers", () => {
 		);
 		const result = await pending;
 
+		// --inspect-brk=0 → Node binds a free port atomically; port comes from stderr.
 		expect(mockSpawn).toHaveBeenCalledWith(
 			"node",
-			["--inspect-brk=4555", "app.js"],
+			["--inspect-brk=0", "app.js"],
 			expect.objectContaining({
 				stdio: ["pipe", "pipe", "pipe"],
 			}),
@@ -78,7 +58,6 @@ describe("process helpers", () => {
 	});
 
 	it("rejects when child emits spawn error", async () => {
-		setupFreePort(4777);
 		const child = createChild();
 		mockSpawn.mockReturnValue(child);
 

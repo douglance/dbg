@@ -155,7 +155,7 @@ function runSimctl(args: string[]): string {
 function platformFromRuntime(
 	runtime: string,
 ): Exclude<AttachPlatform, "auto"> | null {
-	if (/\.visionOS-/i.test(runtime)) return "visionos";
+	if (/\.(visionOS|xrOS|realityOS)-/i.test(runtime)) return "visionos";
 	if (/\.iOS-/i.test(runtime)) return "ios";
 	if (/\.tvOS-/i.test(runtime)) return "tvos";
 	if (/\.watchOS-/i.test(runtime)) return "watchos";

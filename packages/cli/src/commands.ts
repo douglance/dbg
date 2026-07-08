@@ -76,12 +76,12 @@ export async function handleStatus(
 
 export async function handleTrace(
 	store: EventStore,
-	args?: string,
+	limit = 50,
 ): Promise<Response> {
-	const limit = parseTraceLimit(args);
 	if (!Number.isInteger(limit) || limit < 1) {
 		return { ok: false, error: "usage: dbg trace [limit]" };
 	}
+	const cappedLimit = Math.min(limit, 1000);
 
 	const rows = store.query(
 		`
@@ -106,7 +106,7 @@ export async function handleTrace(
 		ORDER BY id DESC
 		LIMIT ?
 	`,
-		[limit],
+		[cappedLimit],
 	);
 
 	return {
@@ -366,8 +366,12 @@ export async function handlePause(
 		await executor.send("Debugger.pause");
 		await waitP;
 	} catch (error) {
+		const msg = (error as Error).message;
+		const isTimeout = msg.includes("timeout") || msg.includes("timed out");
 		return flowFailure(
-			`pause failed: ${(error as Error).message}`,
+			isTimeout
+				? "pause failed: CoreDevice cannot interrupt running processes. Set breakpoints before continuing"
+				: `pause failed: ${msg}`,
 			errorCode(error, "DAP_PAUSE_FAILED"),
 			resolveDapPhase(executor, state),
 		);
@@ -389,32 +393,11 @@ export async function handlePause(
 export async function handleSetBreakpoint(
 	executor: FlowExecutor,
 	state: DaemonState,
-	args: string,
+	filePattern: string,
+	lineNum: number,
+	condition = "",
 ): Promise<Response> {
 	if (!state.connected) return { ok: false, error: "not connected" };
-
-	// Parse: file:line [if condition]
-	const ifMatch = args.match(/^(.+?)\s+if\s+(.+)$/);
-	let locationPart: string;
-	let condition = "";
-
-	if (ifMatch) {
-		locationPart = ifMatch[1];
-		condition = ifMatch[2];
-	} else {
-		locationPart = args;
-	}
-
-	const colonIdx = locationPart.lastIndexOf(":");
-	if (colonIdx === -1) {
-		return { ok: false, error: "expected file:line" };
-	}
-
-	const filePattern = locationPart.slice(0, colonIdx);
-	const lineNum = Number.parseInt(locationPart.slice(colonIdx + 1), 10);
-	if (Number.isNaN(lineNum)) {
-		return { ok: false, error: "invalid line number" };
-	}
 
 	// Build a URL regex that matches the file pattern.
 	// First check if we already know the script to get its exact URL.
@@ -473,21 +456,21 @@ export async function handleSetBreakpoint(
 export async function handleDeleteBreakpoint(
 	executor: FlowExecutor,
 	state: DaemonState,
-	args: string,
+	id: string,
 ): Promise<Response> {
 	if (!state.connected) return { ok: false, error: "not connected" };
 
-	const bp = state.breakpoints.get(args);
+	const bp = state.breakpoints.get(id);
 	if (!bp) {
-		return { ok: false, error: `breakpoint not found: ${args}` };
+		return { ok: false, error: `breakpoint not found: ${id}` };
 	}
 
 	try {
 		await executor.send("Debugger.removeBreakpoint", {
 			breakpointId: bp.cdpBreakpointId ?? bp.id,
 		});
-		state.breakpoints.delete(args);
-		return { ok: true, id: args };
+		state.breakpoints.delete(id);
+		return { ok: true, id };
 	} catch (e) {
 		return {
 			ok: false,
@@ -564,7 +547,9 @@ export async function handleEval(
 export async function handleSource(
 	executor: FlowExecutor,
 	state: DaemonState,
-	args?: string,
+	file?: string,
+	start?: number,
+	end?: number,
 ): Promise<Response> {
 	if (!state.connected) return { ok: false, error: "not connected" };
 
@@ -573,20 +558,18 @@ export async function handleSource(
 	let endLine: number;
 	let currentLine: number | undefined;
 
-	if (args) {
-		// Parse: file startLine endLine
-		const parts = args.split(/\s+/);
-		if (parts.length === 3) {
-			const matchedScriptId = findScript(state, parts[0]);
-			if (!matchedScriptId) {
-				return { ok: false, error: `no script matching "${parts[0]}"` };
-			}
-			scriptId = matchedScriptId;
-			startLine = Number.parseInt(parts[1], 10);
-			endLine = Number.parseInt(parts[2], 10);
-		} else {
+	if (file !== undefined || start !== undefined || end !== undefined) {
+		// Explicit range: all three must be provided
+		if (file === undefined || start === undefined || end === undefined) {
 			return { ok: false, error: "expected: file startLine endLine" };
 		}
+		const matchedScriptId = findScript(state, file);
+		if (!matchedScriptId) {
+			return { ok: false, error: `no script matching "${file}"` };
+		}
+		scriptId = matchedScriptId;
+		startLine = start;
+		endLine = end;
 	} else {
 		// Use current paused location
 		if (!state.paused || state.callFrames.length === 0) {
@@ -660,15 +643,6 @@ function findScript(state: DaemonState, pattern: string): string | undefined {
 
 function escapeRegex(str: string): string {
 	return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function parseTraceLimit(args?: string): number {
-	if (!args) return 50;
-	const trimmed = args.trim();
-	if (!trimmed) return 50;
-	const parsed = Number.parseInt(trimmed, 10);
-	if (Number.isNaN(parsed)) return -1;
-	return Math.min(parsed, 1000);
 }
 
 function nextStopEpoch(executor: FlowExecutor): number | undefined {

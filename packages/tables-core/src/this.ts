@@ -1,6 +1,5 @@
 // `this` binding table — shows this context per frame
 
-import type { WhereExpr } from "@dbg/query";
 import type { VirtualTable } from "@dbg/query";
 import { extractFilterValue } from "./utils.js";
 

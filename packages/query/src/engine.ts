@@ -1,7 +1,8 @@
 import type { DebugExecutor } from "@dbg/types";
 
 import { filterRows, limitRows, orderRows } from "./filter.js";
-import { parseQuery } from "./parser.js";
+import { materializeQuery, referencedTables } from "./materialize.js";
+import { parseQuery, type Query } from "./parser.js";
 import { getDefaultRegistry, type QueryRegistry } from "./registry.js";
 
 export async function executeQuery(
@@ -15,7 +16,21 @@ export async function executeQuery(
 		format = "json";
 		sql = sql.slice(0, -2).trim();
 	}
-	const query = parseQuery(sql);
+
+	// Real-SQL materialization path: a query referencing more than one
+	// registered table, or one the legacy parser cannot parse (JOIN, BETWEEN,
+	// GROUP BY, aliases), is executed against an in-memory node:sqlite DB.
+	const referenced = referencedTables(sql, registry.listTables());
+	let query: Query | null = null;
+	try {
+		query = parseQuery(sql);
+	} catch (parseError) {
+		if (referenced.length === 0) throw parseError;
+	}
+	if (referenced.length > 1 || query === null) {
+		const result = await materializeQuery(sql, referenced, executor, registry);
+		return { ...result, format };
+	}
 
 	const table = registry.getTable(query.table, executor.protocol);
 	if (!table) {
@@ -39,6 +54,10 @@ export async function executeQuery(
 
 	const result = await table.fetch(query.where, executor);
 	let rows = filterRows(result.columns, result.rows, query.where);
+
+	if (query.count) {
+		return { columns: ["count"], rows: [[rows.length]], format };
+	}
 
 	if (query.orderBy) {
 		rows = orderRows(result.columns, rows, query.orderBy);

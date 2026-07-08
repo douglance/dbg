@@ -313,4 +313,50 @@ describe("provider-apple-device", () => {
 			}),
 		});
 	});
+
+	it("fails with an ambiguity error when both booted simulator and device are present", () => {
+		mockListDevices.mockReturnValue([
+			{
+				identifier: "DEVICE-UUID-1",
+				hardwareProperties: { platform: "visionOS", udid: "DEVICE-UDID-1" },
+				deviceProperties: { name: "Apple Vision Pro", bootState: "booted" },
+			},
+		]);
+		mockListSimulatorDevices.mockReturnValue([
+			{
+				identifier: "SIM-UDID-1",
+				name: "Apple Vision Pro Simulator",
+				state: "booted",
+				isAvailable: true,
+				platform: "visionos",
+				runtime: "com.apple.CoreSimulator.SimRuntime.visionOS-2-0",
+			},
+		]);
+
+		expect(() =>
+			resolveAppleDeviceAttachTarget({
+				provider: "apple-device",
+				platform: "visionos",
+				bundleId: "com.my.app",
+			}),
+		).toThrowError(AppleDeviceProviderError);
+
+		try {
+			resolveAppleDeviceAttachTarget({
+				provider: "apple-device",
+				platform: "visionos",
+				bundleId: "com.my.app",
+			});
+		} catch (error) {
+			const providerError = error as AppleDeviceProviderError;
+			expect(providerError.code).toBe("ambiguous_device_selection");
+			expect(providerError.details?.hint).toContain("--device");
+			expect(providerError.details?.suggestedCommands).toEqual(
+				expect.arrayContaining([
+					expect.stringContaining("--device sim:"),
+					expect.stringContaining("--device device:"),
+				]),
+			);
+		}
+	});
 });

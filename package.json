@@ -1,6 +1,6 @@
 {
   "name": "@dbg/workspace",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -19,15 +19,19 @@
     "format": "biome format --write packages test",
     "check": "tsc --noEmit",
     "format:check": "biome format --error-on-warnings packages test",
-    "ci": "pnpm run lint && pnpm run format:check && pnpm run check && pnpm run build && pnpm run test"
+    "ci": "pnpm run lint && pnpm run format:check && pnpm run check && pnpm run test"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.4",
-    "@types/node": "^22.13.1",
+    "@biomejs/biome": "^2.5.2",
+    "@types/node": "^26.1.0",
+    "@types/pngjs": "^6.0.5",
     "@vscode/debugprotocol": "^1.68.0",
-    "devtools-protocol": "^0.0.1581282",
-    "esbuild": "^0.25.0",
-    "typescript": "^5.7.3",
-    "vitest": "^3.0.5"
+    "devtools-protocol": "^0.0.1656784",
+    "esbuild": "^0.28.1",
+    "pngjs": "^7.0.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
   }
 }

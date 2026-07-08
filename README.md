@@ -21,7 +21,7 @@ Traditional debuggers are interactive. They assume a human is sitting at a termi
 **dbg** treats debugging as an API:
 
 - **Stateless CLI** — every call is independent. No session to manage.
-- **Machine-readable output** — TSV by default, JSON with `\j`. No color, no decoration, no unicode.
+- **Machine-readable output** — TOON (compact, token-efficient) by default, JSON with `--json`. No color, no decoration, no unicode.
 - **SQL query engine** — `SELECT name, value FROM vars WHERE frame_id = 0`. Sixteen virtual tables expose everything the debugger can see.
 - **Event store** — every CDP message, connection event, and daemon lifecycle action is logged to SQLite for post-hoc analysis.
 - **Background daemon** — a thin daemon holds the CDP connection between calls. The CLI is just a client.
@@ -50,9 +50,9 @@ Attach to a running process:
 ```sh
 node --inspect-brk app.ts &
 dbg open 9229
-dbg status                    # connected  paused  app.ts:1  (anonymous)
+dbg status                    # ok: true, connected: true, status: paused, file: app.ts, line: 1
 dbg b app.ts:42
-dbg c                         # paused  app.ts  42  handleRequest
+dbg c                         # ok: true, status: paused, file: app.ts, line: 42, function: handleRequest
 dbg q "SELECT name, value FROM vars WHERE frame_id = 0"
 dbg close
 ```
@@ -84,17 +84,27 @@ dbg devices
 dbg devices --platform ios
 ```
 
+List installed apps on a device:
+
+```sh
+dbg apps <device-id>
+```
+
 Attach to a running app by bundle id:
 
 ```sh
 dbg attach com.example.myapp
 ```
 
+If both a booted simulator and a booted physical device match, `dbg attach` now fails fast with an ambiguity error and asks you to choose `--device` explicitly.
+
 Launch (if not running) then attach:
 
 ```sh
 dbg attach com.example.myapp --launch
 ```
+
+On physical devices, if attach fails without `--launch`, dbg automatically retries with `--launch` for a debuggable session. After a `--launch` attach, dbg auto-continues past dyld into app code (lands at `main`).
 
 Force simulator vs physical device:
 
@@ -122,6 +132,8 @@ dbg attach com.example.myapp --attach-strategy gdb-remote
 | `dbg run "<command>"` | Spawn with `--inspect-brk`, connect automatically |
 | `dbg restart` | Kill, respawn, reconnect, restore all breakpoints |
 | `dbg status` | Connection state, pause state, location, PID |
+| `dbg devices` | List Apple devices and simulators |
+| `dbg apps <device-id>` | List installed apps on a device |
 
 ### Flow Control
 
@@ -133,24 +145,69 @@ dbg attach com.example.myapp --attach-strategy gdb-remote
 | `dbg o` | Step out |
 | `dbg pause` | Pause execution |
 
-All flow commands output a single line:
+All flow commands output a structured result:
 
 ```
-paused	app.ts	42	handleRequest
+ok: true
+status: paused
+file: app.ts
+line: 42
+function: handleRequest
 ```
 
-Or `running` if no breakpoint was hit.
+Or `status: running` if no breakpoint was hit. Pass `--json` to receive the
+same payload as JSON.
 
 ### Breakpoints
 
 ```sh
 dbg b app.ts:42               # set
-dbg b app.ts:42 if x > 0      # conditional
+dbg b app.ts:42 --if "x > 0"  # conditional
 dbg db <id>                   # delete
 dbg bl                        # list all
 ```
 
 Breakpoints persist across `dbg restart`.
+
+### Taps (logpoints)
+
+A tap is a never-pausing conditioned breakpoint (the DevTools logpoint trick)
+that logs an expression each time a line runs — instrument without editing code
+or stopping. Works on browser and node (V8 inspector) sessions.
+
+```sh
+dbg tap add src/Cart.tsx:42 "user.id"   # 1-based line; echoes "armed on <url>:<line>"
+dbg tap add bundle.js:12 "x" --url "…"  # --url overrides the file-suffix regex
+dbg tap list                            # all taps
+dbg tap hits <id> --tail 20             # recent captured values
+dbg tap rm <id>
+dbg q "SELECT ts, value FROM tap_hits WHERE tap_id = <id>"
+```
+
+The `__dbg_tap:` console sentinel is routed to `tap_hits` and suppressed from the
+user console, `after` consoleDelta, `dbg why`, and the timeline — taps never
+pollute the signals they observe.
+
+### Flows (record and replay)
+
+Flows record user actions on the active recorder page and replay them later with
+per-step readiness gates, captures, console verdicts, and diff-vs-last-run data.
+
+```sh
+dbg record http://localhost:3000
+dbg flow record checkout
+dbg flow stop
+dbg flow run checkout --step-timeout 5000
+dbg flow list
+dbg flow show checkout
+dbg q "SELECT * FROM flow_run_steps"
+```
+
+Selectors prefer unique `#id`, then `[data-testid]`, then a unique tag/class
+selector, then a full `nth-of-type` fallback path.
+Scroll-only flows are valid too: recording `window.scrollTo(...)` or a user
+scroll persists a `scroll` step and replays it against static `file://` reports
+as well as app pages.
 
 ### Inspection
 
@@ -174,6 +231,95 @@ dbg reconnect                 # reconnect to last known websocket URL
 | `dbg trace [limit]` | Show recent CDP message history with direction and latency |
 | `dbg health` | Evaluate `1+1` on target, report latency in ms |
 | `dbg reconnect` | Reconnect to the last websocket URL from a previous session |
+
+### Visual Flight Recorder
+
+Record what the UI looks like over time — headless, in the background — and get
+before/after verdicts with component blame. Built for the agent loop
+**record → edit → after**:
+
+```sh
+dbg record http://localhost:3000    # daemon launches managed headless Chrome, keeps recording
+dbg mark before-fix                 # stamp a named epoch (auto-epochs from edit bursts)
+# ... edit code; saved files + vite HMR modules annotate captures ...
+dbg after --json                    # capture now, diff vs anchor
+dbg after --open                    # same, and open the HTML report for humans
+dbg timeline                        # filmstrip HTML of the whole recording
+dbg replay <captureId>              # restore a capture's URL/scroll
+dbg record --status | --stop
+```
+
+| Command | Description |
+|---|---|
+| `dbg record <url>` | Start recording (`--viewport WxH\|desktop\|tablet\|mobile`, `--idle <ms>`, `--max-frames <n>`, `--max-bytes <n>`, `--events-ttl <ms>`) |
+| `dbg mark [name]` | Stamp a named epoch in the timeline |
+| `dbg after [name]` | Capture + diff vs anchor: `--at capture:<id>\|mark:<name>\|time:<ts\|10m>\|file:<path>`, `--open` |
+| `dbg timeline` | Self-contained filmstrip HTML of the most recent frames (`--open`, `--limit <n>`, default 100) |
+| `dbg replay <id>` | Restore a capture's URL/scroll in the recorder page |
+| `dbg why [substring]` | Blame the most recent (or matched) error → ranked edit/epoch/commit/prompt + one-line answer |
+| `dbg shoot <target>` | One-off capture: URL or `Component.tsx` (`--selector`, `--states hover,focus`, `--props <json>`, `--viewport`, `--full-page`, `--out <dir>`, `--name`) |
+
+`dbg after` returns one JSON verdict: pixel diff (`pair.diffPercent`), changed
+regions blamed to **React component names** (`regions`, with `causal: true` when
+that component's file was just saved/HMR'd; tag.class labels on non-React
+pages), computed-style deltas (`styleChanges`), and new console/exception/
+network failures since the anchor — plus a self-contained `report.html`
+(side-by-side, wipe slider, onion skin, diff overlay with labeled regions).
+
+**Verdicts (Plan V).** `dbg after` also returns `networkDiff` (requests grouped
+by method + normalized URL pattern → added/removed/status-changed/duration-delta),
+`stateChanges` (added/removed/changed local & sessionStorage keys, from the
+per-capture `state_snapshots`), and `a11yNew` (accessibility issues new since the
+anchor: missing alt, control/button without name, control without label,
+duplicate landmark, missing title), and `perfDelta` (Plan X: ΔLCP, ΔCLS from new
+layout shift, new longtask count, ΔJSHeap, Δbundle_bytes, interaction count/max)
+sourced from a buffered `PerformanceObserver` plus a per-capture
+`Performance.getMetrics` subset and a per-nav Script/Stylesheet byte total in the
+`perf_samples` table — nav_id increments per hard navigation, so CLS/LCP are
+per-hard-nav on the HMR-alive recorder. Each section is individually skippable
+(`--skip-network`/`--skip-state`/`--skip-a11y`/`--skip-perf`); `--perf-budget
+lcp=2500,cls=0.1` fails on breach. perfDelta is pure store reads (no extra CDP
+round-trip to `after`). `dbg why [substring]` walks the
+unified timeline back from an error to ranked causes — the recent edits (weighted
+by recency + whether their file is in the stack trace), the enclosing epoch, the
+nearest commit, and the active agent prompt — and phrases a one-line `answer`
+like *"…2.1s after you saved src/Cart.tsx (epoch 4: 'before-fix', prompt: 'add
+coupon field')"*. `dbg why` reads the **persisted** event store, so it works
+after `record --stop`. Both stay within the sub-second `after` budget (measured
+~220ms; no budget increase needed). The full Accessibility tree is stored as a
+gzipped, retention-managed blob per capture (`captures.ax_path`).
+
+`dbg shoot Component.tsx` renders the component in an esbuild harness using
+*your* project's react-dom and screenshots `#dbg-root`; `--states` forces
+`:hover`/`:focus`/etc. via CSS.forcePseudoState — one PNG per state under
+`.dbg/shots/` (`name.png`, `name@hover.png`, ...), with reduced motion
+emulated for deterministic pixels. For Storybook, shoot the story iframe URL
+directly.
+
+Recorder data is queryable like everything else: `captures`, `epochs`, `diffs`,
+`regions`, and the first-class `edits` file-edit stream (e.g. `dbg q "SELECT ts,
+changed_files, epoch_id FROM captures"`). Every edit, commit, screenshot, and
+agent prompt shares one epoch-ms `ts`, so they all join on the unified
+`timeline` table — see **Unified Timeline & Dev Tables** below.
+
+**Retention.** History is metadata (cheap, kept forever); pixels decay
+(expensive, bounded). PNGs and DOM snapshots are stored content-addressed under
+`.dbg/recordings/recorder/blobs/` — identical frames share one blob. Per
+recording session, at most 200 full-resolution frames and 100MB of blobs are
+kept (`--max-frames`, `--max-bytes`); over budget, the oldest frames decay
+first to ≤320px thumbnails, then to metadata-only rows (`captures.tier`:
+`full` → `thumb` → `meta`), preferring to keep each epoch's first and last
+frames. Never decayed: the newest capture, epoch anchors, and any capture
+referenced by a diff. Raw CDP `events` rows are pruned after 30 minutes
+(`--events-ttl <ms>`, most-recent 50k rows always kept). `dbg record --status`
+reports `diskBytes`, `fullFrames`, `thumbFrames`, `metaFrames`, and
+`eventsRows`; `dbg timeline` embeds the most recent 100 frames (`--limit`).
+
+**Performance.** Sub-second after-verdicts are the design target — agents can
+poll the loop cheaply. Budgets are enforced in CI (`test/perf.test.ts`):
+`record` cold start < 4s (includes Chrome launch), `mark` < 500ms,
+`after` < 1.5s, `timeline` < 1s, `shoot` < 5s (throwaway Chrome), DOM
+mutation → capture row < 1.5s. Typical measured times are ~3x under budget.
 
 ### Query Engine
 
@@ -221,23 +367,84 @@ WHERE supports: `=`, `!=`, `<`, `>`, `<=`, `>=`, `LIKE`, `AND`, `OR`, parenthese
 
 Tables marked with required filters (`props`, `proto`, `source`, `listeners`) will tell you what they need.
 
+The former CDP event-stream `timeline` view is now `events_stream` (schema
+unchanged: `stream`, `phase`, `severity`, `entity`, `summary`, plus the
+`detail`/`include`/`window_ms` pushdown filters). The `timeline` name now belongs
+to the unified cross-source union below.
+
+##### Unified Timeline & Dev Tables
+
+Every development signal lives on one epoch-milliseconds `ts` axis, so file
+edits, git commits, screenshots, and agent history join directly:
+
+| Table | Description | Key Columns |
+|---|---|---|
+| `edits` | First-class file-edit stream (one row per fs-watch event during recording) | `id`, `ts`, `path`, `epoch_id`, `session_id` |
+| `state_snapshots` | Per-capture local/sessionStorage dump | `capture_id`, `kind`, `data` |
+| `a11y_issues` | Per-capture accessibility issues | `capture_id`, `rule`, `selector`, `detail` |
+| `perf_samples` | Perf flight recorder: observer batches + per-capture metrics/bundle-bytes | `ts`, `nav_id`, `capture_id`, `metric`, `value`, `detail` |
+| `taps` | Logpoints (never-pausing conditioned breakpoints) | `id`, `session_id`, `file`, `line`, `expr`, `url_regex` |
+| `tap_hits` | Each tap fire | `tap_id`, `ts`, `value` |
+| `flows` | Recorded user flows | `id`, `ts`, `name`, `url`, `session_id` |
+| `flow_steps` | Recorded flow actions | `flow_id`, `idx`, `kind`, `selector`, `fallback_path`, `value` |
+| `flow_runs` | Flow replay summaries | `id`, `ts`, `flow_id`, `status`, `steps_total`, `steps_passed` |
+| `flow_run_steps` | Per-step replay verdicts | `run_id`, `step_id`, `idx`, `status`, `capture_id`, `error`, `diff_percent` |
+| `commits` | `git log` of the cwd repo (override `WHERE repo = '/abs'`, 500 most recent) | `hash`, `short_hash`, `ts`, `author`, `summary`, `files` |
+| `agent_prompts` | Claude Code prompts, cwd-scoped (`WHERE project = '<slug>'` widens) | `ts`, `display`, `project` |
+| `agent_sessions` | Per-session transcript summaries (cached by mtime/size) | `session_id`, `ts_first`, `ts_last`, `title`, `message_count` |
+| `timeline` | Union over captures/epochs/edits/console-errors/exceptions/commits/prompts/diffs | `ts`, `kind`, `session_id`, `label`, `ref_id`, `detail` |
+
+`timeline` defaults to the last 24h (unless a `WHERE` constrains `ts`); `kind` is
+`capture`/`mark`/`epoch`/`edit`/`error`/`exception`/`netfail`/`commit`/`prompt`/`diff`.
+`dbg q` threads your shell cwd so the dev tables scope to your project.
+
+Queries that reference more than one table (or use `JOIN`/`BETWEEN`/`GROUP
+BY`/aliases the single-table engine can't parse) are materialized into an
+in-memory SQLite DB and run as **real SQL**:
+
+```sh
+# Which prompt → edit → error chain (one SELECT across four sources)
+dbg q "SELECT p.display, e.path, x.label
+       FROM agent_prompts p
+       JOIN edits e ON e.ts BETWEEN p.ts AND p.ts + 600000
+       JOIN timeline x ON x.kind = 'error' AND x.ts BETWEEN e.ts AND e.ts + 5000
+       ORDER BY e.ts"
+
+# Errors within 5s of each edit
+dbg q "SELECT e.path, t.label FROM edits e
+       JOIN timeline t ON t.kind = 'error' AND t.ts BETWEEN e.ts AND e.ts + 5000"
+
+# Commits with no subsequent capture
+dbg q "SELECT c.short_hash, c.summary FROM commits c
+       WHERE (SELECT COUNT(*) FROM captures cap WHERE cap.ts > c.ts) = 0"
+```
+
+Cold-scan costs: `commits` ~50–150ms (git), `agent_prompts` ~100ms (one JSONL),
+`agent_sessions` ~0.7s cold / ~50ms warm (cached), store tables sub-ms. Network
+failures ride the `netfail` kind, reconstructed from the raw events table (whose
+`ts` is wall-clock epoch-ms at receipt, not CDP's monotonic timestamp).
+
 #### Object Drill-Down
 
 ```sh
 # Get the object_id
 dbg q "SELECT name, object_id FROM vars WHERE name = 'config'"
-# name    object_id
-# config  1234
+# ok: true
+# columns[2]: name,object_id
+# rows[1]:
+#   - [2]: config,1234
 
 # Inspect its properties
 dbg q "SELECT name, type, value FROM props WHERE object_id = '1234'"
-# name    type     value
-# port    number   3000
-# debug   boolean  true
-# nested  object   [Object]
+# ok: true
+# columns[3]: name,type,value
+# rows[3]:
+#   - [3]: port,number,3000
+#   - [3]: debug,boolean,true
+#   - [3]: nested,object,[Object]
 
-# Keep going
-dbg q "SELECT name, value FROM props WHERE object_id = '5678'"
+# Keep going (or add --json for easy parsing)
+dbg q "SELECT name, value FROM props WHERE object_id = '5678'" --json
 ```
 
 #### Event Log Queries
@@ -261,6 +468,7 @@ dbg q "SELECT ts, source, method FROM events WHERE category = 'cdp' ORDER BY id 
 All debugger activity is recorded to a SQLite database for post-hoc analysis and diagnostics.
 
 - **Location**: `/tmp/dbg-events.db` (override with `DBG_EVENTS_DB` env var)
+  - If default paths are unhealthy and no `DBG_SOCK`/`DBG_EVENTS_DB` overrides are set, dbg automatically retries with deterministic per-user/per-repo fallback paths under `/tmp`.
 - **Format**: SQLite with WAL mode, async batched writes (~100ms flush interval)
 - **Categories**: `daemon` (lifecycle), `connection` (connect/disconnect/reconnect), `cdp` (protocol messages)
 - **Session tracking**: Each connection gets a unique session ID for correlation
@@ -269,12 +477,13 @@ The event store powers the `events`, `cdp`/`cdp_messages`, and `connections` vir
 
 ## Output Format
 
-- **TSV** for tabular data. Header row, tab-delimited.
-- **Bare values** for eval. Single line.
-- **Single status line** for flow commands.
-- **JSON** mode: append `\j` to any query — `dbg q "SELECT * FROM frames\j"`
-- **stdout** for data, **stderr** for errors.
-- **Exit 0** on success, **1** on error.
+- **TOON** (compact, token-efficient) by default for every command.
+- **JSON** with `--json`, or pick a format explicitly via `--format toon|json|yaml|md|jsonl`.
+- **stdout** for data and errors. **Exit 0** on success, **1** on error.
+
+TOON is a YAML-like encoding that is roughly half the tokens of equivalent JSON
+while staying trivial for a script to parse. Use `--json` when you want to pipe
+output into another tool.
 
 No color. No decoration. Designed to be parsed.
 
@@ -292,7 +501,7 @@ caller        CLI              daemon            target
   │            exit               │                 │
 ```
 
-The CLI is a thin client. It connects to a background daemon over a Unix socket (`/tmp/dbg.sock`), sends one command, receives one response, prints it, and exits. The daemon holds the persistent Chrome DevTools Protocol connection to the target.
+The CLI is a thin client. It connects to a background daemon over a Unix socket (default `/tmp/dbg.sock`), sends one command, receives one response, prints it, and exits. If the default socket/db path is unhealthy, it auto-retries with a deterministic per-user/per-repo fallback path (unless `DBG_SOCK`/`DBG_EVENTS_DB` are explicitly set). The daemon holds the persistent Chrome DevTools Protocol connection to the target.
 
 The daemon also maintains an **event store** (SQLite) that records every CDP message, connection event, and lifecycle action. This enables the `trace`, `health`, and event log query tables without adding state to the CLI.
 
@@ -304,7 +513,12 @@ Works with any target that speaks the V8 Inspector Protocol:
 - Deno (`--inspect`)
 - Any V8-based runtime with an inspector
 
-Domain enabling is timeout-resilient — targets that don't implement all CDP domains (like embedded V8 runtimes) connect gracefully with reduced functionality.
+And native targets via LLDB DAP:
+
+- iOS, tvOS, watchOS, visionOS apps on physical devices and simulators
+- Local native binaries via `dbg attach-lldb`
+
+Domain enabling is timeout-resilient — targets that don't implement all CDP domains (like embedded V8 runtimes) connect gracefully with reduced functionality. Native sessions handle adapter disconnections gracefully (e.g., `registers` on physical devices returns a friendly error instead of crashing the session).
 
 ## License
 

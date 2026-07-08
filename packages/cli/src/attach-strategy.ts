@@ -171,6 +171,7 @@ async function runAttachStrategy(
 			});
 			return;
 		}
+		const startedStopped = options.resolution.metadata?.startedStopped === true;
 		await options.dap.attachLldbToPid({
 			pid: options.resolution.pid,
 			waitFor: false,
@@ -179,6 +180,7 @@ async function runAttachStrategy(
 				`device process attach --pid ${options.resolution.pid}`,
 			],
 			requestTimeoutMs: options.attachTimeoutMs,
+			startedStopped,
 		});
 		return;
 	}

@@ -12,7 +12,8 @@ import {
 	providerResolutionResultSchema,
 } from "./contracts.js";
 import { listAppleAttachTargets, resolveAppleAttachTarget } from "./apple.js";
-import { discoverDebugProxyPort } from "./devicectl.js";
+import { discoverDebugProxyPort, listApps } from "./devicectl.js";
+import type { AppRecord } from "./devicectl.js";
 import { AppleDeviceProviderError } from "./errors.js";
 import { resolveVisionOsAttachTarget } from "./visionos.js";
 
@@ -24,6 +25,7 @@ export {
 	asResolutionResult,
 	attachRequestSchema,
 	listAppleAttachTargets,
+	listApps,
 	resolveAppleAttachTarget,
 	discoverDebugProxyPort,
 	formatProviderError,
@@ -32,6 +34,7 @@ export {
 	providerResolutionResultSchema,
 	resolveVisionOsAttachTarget,
 };
+export type { AppRecord };
 
 export function resolveAppleDeviceAttachTarget(
 	request: AttachRequest,

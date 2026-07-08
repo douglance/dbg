@@ -19,11 +19,26 @@ export const registersTable: VirtualTable = {
 			return { columns: this.columns, rows };
 		}
 
-		const response = (await executor.send("registers", {
-			threadId: dapState?.threadId ?? undefined,
-		})) as {
+		let response: {
 			registers?: Array<{ group?: string; name: string; value: string }>;
 		};
+		try {
+			response = (await executor.send("registers", {
+				threadId: dapState?.threadId ?? undefined,
+			})) as typeof response;
+		} catch (error) {
+			const msg = error instanceof Error ? error.message.toLowerCase() : "";
+			if (
+				msg.includes("transport") ||
+				msg.includes("closed") ||
+				msg.includes("exited")
+			) {
+				throw new Error(
+					"registers unavailable: debug adapter disconnected (physical device sessions may not support register reads)",
+				);
+			}
+			throw error;
+		}
 
 		for (const reg of response.registers ?? []) {
 			rows.push([reg.group ?? "general", reg.name, reg.value]);

@@ -1,4 +1,5 @@
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -6,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const CLI = path.resolve(__dirname, "../packages/cli/dist/cli.js");
 const SOCKET_PATH = "/tmp/dbg-test.sock";
+const DEFAULT_SOCKET_PATH = "/tmp/dbg.sock";
 const TARGET = path.resolve(__dirname, "fixtures/target.js");
 const EVENTS_DB_PATH = path.resolve(__dirname, ".tmp-events.db");
 
@@ -51,6 +53,19 @@ function findFreePort(): Promise<number> {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fallbackPathsForCwd(cwd: string): {
+	socket: string;
+	eventsDb: string;
+} {
+	const uid =
+		typeof process.getuid === "function" ? String(process.getuid()) : "0";
+	const repoHash = createHash("sha1").update(cwd).digest("hex").slice(0, 10);
+	return {
+		socket: `/tmp/dbg-${uid}-${repoHash}.sock`,
+		eventsDb: `/tmp/dbg-${uid}-${repoHash}-events.db`,
+	};
 }
 
 function killDaemon(): void {
@@ -102,7 +117,7 @@ function killDaemon(): void {
 	}
 }
 
-function killProcessOnPort(port: number): void {
+function _killProcessOnPort(port: number): void {
 	try {
 		// macOS: find and kill process on port
 		const result = execFileSync("lsof", ["-ti", `tcp:${port}`], {
@@ -280,7 +295,7 @@ describe("integration", () => {
 				},
 			});
 			expect(fs.existsSync(customSocket)).toBe(true);
-			expect(r).toContain("disconnected");
+			expect(r).toContain("connected: false");
 		} finally {
 			// Kill daemon on custom socket
 			try {
@@ -307,6 +322,100 @@ describe("integration", () => {
 		}
 	});
 
+	it("falls back to deterministic per-repo socket/db when default socket is unhealthy", async () => {
+		if (fs.existsSync(DEFAULT_SOCKET_PATH)) {
+			// Respect existing local daemon/socket and avoid mutating user state.
+			return;
+		}
+
+		const fakeServer = net.createServer((socket) => {
+			// The CLI may close the connection before we finish writing,
+			// which surfaces as EPIPE. Swallow it — the test's purpose is
+			// to confirm the CLI falls back to a deterministic socket.
+			socket.on("error", () => {});
+			socket.write("not-json\n");
+			socket.end();
+		});
+		await new Promise<void>((resolve, reject) => {
+			fakeServer.once("error", reject);
+			fakeServer.listen(DEFAULT_SOCKET_PATH, resolve);
+		});
+
+		const fallback = fallbackPathsForCwd(process.cwd());
+
+		try {
+			const statusRun = await new Promise<{
+				stdout: string;
+				stderr: string;
+				exitCode: number;
+			}>((resolve, reject) => {
+				const proc = spawn(process.execPath, [CLI, "status"], {
+					env: {
+						...process.env,
+						DBG_SOCK: "",
+						DBG_EVENTS_DB: "",
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				});
+				let stdout = "";
+				let stderr = "";
+				const timeout = setTimeout(() => {
+					proc.kill("SIGKILL");
+					reject(new Error("status command timed out"));
+				}, 15000);
+				proc.stdout?.on("data", (chunk: Buffer) => {
+					stdout += chunk.toString();
+				});
+				proc.stderr?.on("data", (chunk: Buffer) => {
+					stderr += chunk.toString();
+				});
+				proc.once("error", (err) => {
+					clearTimeout(timeout);
+					reject(err);
+				});
+				proc.once("close", (code) => {
+					clearTimeout(timeout);
+					resolve({
+						stdout,
+						stderr,
+						exitCode: code ?? 1,
+					});
+				});
+			});
+			expect(statusRun.exitCode).toBe(0);
+			expect(statusRun.stderr).toBe("");
+			expect(statusRun.stdout).toContain("connected: false");
+			expect(fs.existsSync(fallback.socket)).toBe(true);
+		} finally {
+			fakeServer.close();
+			try {
+				fs.unlinkSync(DEFAULT_SOCKET_PATH);
+			} catch {
+				// ignore
+			}
+			try {
+				execFileSync(process.execPath, [CLI, "close"], {
+					encoding: "utf8",
+					timeout: 5000,
+					env: {
+						...process.env,
+						DBG_SOCK: fallback.socket,
+						DBG_EVENTS_DB: fallback.eventsDb,
+					},
+				});
+			} catch {
+				// ignore
+			}
+			for (const suffix of ["", "-wal", "-shm"]) {
+				try {
+					fs.unlinkSync(fallback.eventsDb + suffix);
+				} catch {
+					// ignore
+				}
+			}
+		}
+	});
+
 	// ─── 1. Daemon lifecycle ───
 
 	it("starts daemon, verifies socket exists, stops via close", async () => {
@@ -316,13 +425,19 @@ describe("integration", () => {
 		expect(fs.existsSync(SOCKET_PATH)).toBe(true);
 		expect(r.exitCode).toBe(0);
 		// Status should show disconnected since we haven't opened anything
-		expect(r.stdout).toContain("disconnected");
+		expect(r.stdout).toContain("connected: false");
 	});
 
 	it("runs query against event store without an active session", () => {
-		const q = dbg("q", "SELECT method FROM events ORDER BY id DESC LIMIT 5");
+		const q = dbg(
+			"q",
+			"SELECT method FROM events ORDER BY id DESC LIMIT 5",
+			"--json",
+		);
 		expect(q.exitCode).toBe(0);
-		expect(q.stdout).toContain("method");
+		const parsed = JSON.parse(q.stdout);
+		expect(parsed.ok).toBe(true);
+		expect(parsed.columns).toEqual(["method"]);
 	});
 
 	// ─── 2. Open + Status + Close ───
@@ -397,9 +512,11 @@ describe("integration", () => {
 
 		dbg("open", String(port));
 
-		const evalResult = dbg("e", "process.pid");
+		const evalResult = dbg("e", "process.pid", "--json");
 		expect(evalResult.exitCode).toBe(0);
-		const pid = Number.parseInt(evalResult.stdout.trim(), 10);
+		const parsed = JSON.parse(evalResult.stdout);
+		expect(parsed.ok).toBe(true);
+		const pid = Number.parseInt(String(parsed.value), 10);
 		expect(pid).toBeGreaterThan(0);
 	});
 
@@ -410,9 +527,11 @@ describe("integration", () => {
 
 		dbg("open", String(port));
 
-		const evalResult = dbg("e", "1 + 2");
+		const evalResult = dbg("e", "1 + 2", "--json");
 		expect(evalResult.exitCode).toBe(0);
-		expect(evalResult.stdout.trim()).toBe("3");
+		const parsed = JSON.parse(evalResult.stdout);
+		expect(parsed.ok).toBe(true);
+		expect(String(parsed.value)).toBe("3");
 	});
 
 	// ─── 7. Breakpoint list ───
@@ -424,11 +543,16 @@ describe("integration", () => {
 
 		dbg("b", "target.js:6");
 
-		const blResult = dbg("bl");
+		const blResult = dbg("bl", "--json");
 		expect(blResult.exitCode).toBe(0);
-		// Should have the header and at least one row
-		expect(blResult.stdout).toContain("id\tfile\tline\tcondition\thits");
-		expect(blResult.stdout).toContain("target.js");
+		const parsed = JSON.parse(blResult.stdout);
+		expect(parsed.ok).toBe(true);
+		expect(parsed.columns).toEqual(["id", "file", "line", "condition", "hits"]);
+		// At least one row referencing target.js
+		const hasTarget = (parsed.rows as unknown[][]).some((row) =>
+			String(row[1] ?? "").includes("target.js"),
+		);
+		expect(hasTarget).toBe(true);
 	});
 
 	// ─── 8. Run command ───
@@ -443,7 +567,7 @@ describe("integration", () => {
 		expect(status.exitCode).toBe(0);
 		expect(status.stdout).toContain("connected");
 		expect(status.stdout).toContain("paused");
-		expect(status.stdout).toContain("pid=");
+		expect(status.stdout).toMatch(/pid:\s*\d+/);
 	});
 
 	it("shows recent CDP trace events", async () => {
@@ -453,27 +577,41 @@ describe("integration", () => {
 		const stepResult = dbg("n");
 		expect(stepResult.exitCode).toBe(0);
 
-		const trace = dbg("trace", "20");
+		const trace = dbg("trace", "20", "--json");
 		expect(trace.exitCode).toBe(0);
-		expect(trace.stdout).toContain(
-			"id\tts\tdirection\tmethod\tlatency_ms\terror\tdata",
+		const parsed = JSON.parse(trace.stdout);
+		expect(parsed.ok).toBe(true);
+		expect(parsed.columns).toEqual([
+			"id",
+			"ts",
+			"direction",
+			"method",
+			"latency_ms",
+			"error",
+			"data",
+		]);
+		const hasStepOver = (parsed.rows as unknown[][]).some((row) =>
+			String(row[3] ?? "").includes("Debugger.stepOver"),
 		);
-		expect(trace.stdout).toContain("Debugger.stepOver");
+		expect(hasStepOver).toBe(true);
 	});
 
 	it("reports health and latency", async () => {
 		const port = await spawnTarget();
 		dbg("open", String(port));
 
-		const health = dbg("health");
+		const health = dbg("health", "--json");
 		expect(health.exitCode).toBe(0);
-		expect(health.stdout.trim()).toMatch(/^healthy \(\d+ms\)$/);
+		const parsed = JSON.parse(health.stdout);
+		expect(parsed.ok).toBe(true);
+		expect(parsed.messages?.[0] ?? "").toMatch(/^healthy \(\d+ms\)$/);
 	});
 
 	it("health fails when disconnected", () => {
 		const health = dbg("health");
 		expect(health.exitCode).toBe(1);
-		expect(health.stderr).toContain("not connected");
+		// incur emits errors on stdout in the default TOON format.
+		expect(`${health.stdout}${health.stderr}`).toContain("not connected");
 	});
 
 	it("queries event store virtual tables", async () => {
@@ -484,13 +622,18 @@ describe("integration", () => {
 		const events = dbg(
 			"q",
 			"SELECT source, category, method FROM events LIMIT 5",
+			"--json",
 		);
 		expect(events.exitCode).toBe(0);
-		expect(events.stdout).toContain("source\tcategory\tmethod");
+		const eventsParsed = JSON.parse(events.stdout);
+		expect(eventsParsed.ok).toBe(true);
+		expect(eventsParsed.columns).toEqual(["source", "category", "method"]);
 
-		const cdp = dbg("q", "SELECT method, direction FROM cdp LIMIT 5");
+		const cdp = dbg("q", "SELECT method, direction FROM cdp LIMIT 5", "--json");
 		expect(cdp.exitCode).toBe(0);
-		expect(cdp.stdout).toContain("method\tdirection");
+		const cdpParsed = JSON.parse(cdp.stdout);
+		expect(cdpParsed.ok).toBe(true);
+		expect(cdpParsed.columns).toEqual(["method", "direction"]);
 	});
 
 	// ─── Multi-session tests ───
@@ -510,14 +653,18 @@ describe("integration", () => {
 			expect(open2.exitCode).toBe(0);
 			expect(open2.stdout).toContain("connected");
 
-			const ss = dbg("ss");
+			const ss = dbg("ss", "--json");
 			expect(ss.exitCode).toBe(0);
-			// Session names appear as first column in TSV rows
-			expect(ss.stdout).toMatch(/^a\t/m);
-			expect(ss.stdout).toMatch(/^b\t/m);
+			const parsed = JSON.parse(ss.stdout);
+			expect(parsed.ok).toBe(true);
+			const names = (parsed.sessions as Array<{ name: string }>).map(
+				(s) => s.name,
+			);
+			expect(names).toContain("a");
+			expect(names).toContain("b");
 
-			dbg("@a", "close");
-			dbg("@b", "close");
+			dbg("close", "--session", "a");
+			dbg("close", "--session", "b");
 		});
 
 		it("'use' switches current session", async () => {
@@ -543,11 +690,11 @@ describe("integration", () => {
 			expect(statusB.exitCode).toBe(0);
 			expect(statusB.stdout).toContain("connected");
 
-			dbg("@a", "close");
-			dbg("@b", "close");
+			dbg("close", "--session", "a");
+			dbg("close", "--session", "b");
 		});
 
-		it("@name prefix targets specific session", async () => {
+		it("--session flag targets specific session", async () => {
 			const t1 = await spawnNewTarget();
 			const t2 = await spawnNewTarget();
 			targetProcess = t1.proc;
@@ -556,24 +703,24 @@ describe("integration", () => {
 			dbg("open", String(t1.port), "a");
 			dbg("open", String(t2.port), "b");
 
-			const statusA = dbg("@a", "status");
+			const statusA = dbg("status", "--session", "a");
 			expect(statusA.exitCode).toBe(0);
 			expect(statusA.stdout).toContain("connected");
 
-			const statusB = dbg("@b", "status");
+			const statusB = dbg("status", "--session", "b");
 			expect(statusB.exitCode).toBe(0);
 			expect(statusB.stdout).toContain("connected");
 
-			const stepA = dbg("@a", "n");
+			const stepA = dbg("n", "--session", "a");
 			expect(stepA.exitCode).toBe(0);
 			expect(stepA.stdout).toContain("paused");
 
-			const stepB = dbg("@b", "n");
+			const stepB = dbg("n", "--session", "b");
 			expect(stepB.exitCode).toBe(0);
 			expect(stepB.stdout).toContain("paused");
 
-			dbg("@a", "close");
-			dbg("@b", "close");
+			dbg("close", "--session", "a");
+			dbg("close", "--session", "b");
 		});
 
 		it("close one session leaves other intact", async () => {
@@ -585,28 +732,32 @@ describe("integration", () => {
 			dbg("open", String(t1.port), "a");
 			dbg("open", String(t2.port), "b");
 
-			dbg("@a", "close");
+			dbg("close", "--session", "a");
 
-			const ss = dbg("ss");
+			const ss = dbg("ss", "--json");
 			expect(ss.exitCode).toBe(0);
-			expect(ss.stdout).toMatch(/^b\t/m);
-			expect(ss.stdout).not.toMatch(/^a\t/m);
+			const parsed = JSON.parse(ss.stdout);
+			const names = (parsed.sessions as Array<{ name: string }>).map(
+				(s) => s.name,
+			);
+			expect(names).toContain("b");
+			expect(names).not.toContain("a");
 
-			// Single remaining session auto-resolves without @name
+			// Single remaining session auto-resolves without --session
 			const status = dbg("status");
 			expect(status.exitCode).toBe(0);
 			expect(status.stdout).toContain("connected");
 
-			dbg("@b", "close");
+			dbg("close", "--session", "b");
 		});
 
-		it("single session works without @name (backwards compat)", async () => {
+		it("single session works without --session (backwards compat)", async () => {
 			const port = await spawnTarget();
 
 			const openResult = dbg("open", String(port), "mysession");
 			expect(openResult.exitCode).toBe(0);
 
-			// No @name needed — single session auto-resolves
+			// No --session needed — single session auto-resolves
 			const status = dbg("status");
 			expect(status.exitCode).toBe(0);
 			expect(status.stdout).toContain("connected");
@@ -627,17 +778,18 @@ describe("integration", () => {
 			dbg("open", String(t1.port), "a");
 			dbg("open", String(t2.port), "b");
 
-			dbg("@a", "n");
-			dbg("@b", "n");
+			dbg("n", "--session", "a");
+			dbg("n", "--session", "b");
 
-			const q = dbg("q", "SELECT method FROM cdp LIMIT 10");
+			const q = dbg("q", "SELECT method FROM cdp LIMIT 10", "--json");
 			expect(q.exitCode).toBe(0);
-			expect(q.stdout).toContain("method");
-			// Should have header + at least one data row
-			expect(q.stdout.trim().split("\n").length).toBeGreaterThan(1);
+			const parsed = JSON.parse(q.stdout);
+			expect(parsed.ok).toBe(true);
+			expect(parsed.columns).toEqual(["method"]);
+			expect((parsed.rows as unknown[][]).length).toBeGreaterThan(0);
 
-			dbg("@a", "close");
-			dbg("@b", "close");
+			dbg("close", "--session", "a");
+			dbg("close", "--session", "b");
 		});
 	});
 });

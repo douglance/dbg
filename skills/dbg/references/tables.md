@@ -212,6 +212,78 @@ Methods are normalized to canonical names (for example, `Debugger.scriptParsed.u
 | `include` | string | Effective stream filter mode |
 | `window_ms` | number | Effective correlation window around anchor |
 
+## Native Tables (LLDB/DAP Sessions)
+
+### registers
+CPU register values. Gracefully handles adapter disconnections on physical devices.
+
+| Column | Type | Description |
+|---|---|---|
+| `group` | string | Register group (general, floating point, etc.) |
+| `name` | string | Register name (x0, sp, pc, etc.) |
+| `value` | string | Register value (hex) |
+
+### memory
+Process memory bytes. **Requires** `WHERE address = '<addr>' AND length = <n>`.
+
+| Column | Type | Description |
+|---|---|---|
+| `offset` | string | Memory offset |
+| `hex` | string | Hex representation |
+| `ascii` | string | ASCII representation |
+
+### disassembly
+Disassembled instructions. **Requires** `WHERE address = '<addr>'`. Uses `instructionPointerReference` from DAP frames (not file paths).
+
+| Column | Type | Description |
+|---|---|---|
+| `address` | string | Instruction address |
+| `instruction` | string | Mnemonic |
+| `operands` | string | Instruction operands |
+| `comment` | string | Disassembler comment |
+
+### threads
+Active threads in the target process.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | number | Thread ID |
+| `name` | string | Thread name |
+| `stopped` | boolean | Is thread stopped |
+
+### modules
+Loaded modules/shared libraries.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | string | Module ID |
+| `name` | string | Module name |
+| `path` | string | File path |
+| `base_address` | string | Load address |
+| `size` | number | Module size |
+
+### watchpoints
+Hardware watchpoints.
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | number | Watchpoint ID |
+| `address` | string | Watch address |
+| `size` | number | Watch size |
+| `type` | string | Watch type (read, write, access) |
+| `hits` | number | Hit count |
+
+### signals
+Signal handling configuration.
+
+| Column | Type | Description |
+|---|---|---|
+| `name` | string | Signal name (SIGINT, SIGSEGV, etc.) |
+| `number` | number | Signal number |
+| `pass` | boolean | Pass to process |
+| `stop` | boolean | Stop on signal |
+| `notify` | boolean | Notify debugger |
+
 ## Browser Tables
 
 ### network

@@ -1,6 +1,6 @@
 {
 	"name": "@dbg/cli",
-	"version": "0.2.0",
+	"version": "0.4.0",
 	"private": true,
 	"type": "module",
 	"bin": {
@@ -17,13 +17,21 @@
 	"dependencies": {
 		"@dbg/adapter-cdp": "workspace:*",
 		"@dbg/adapter-dap": "workspace:*",
+		"@dbg/diff": "workspace:*",
+		"@dbg/launcher": "workspace:*",
 		"@dbg/provider-apple-device": "workspace:*",
 		"@dbg/query": "workspace:*",
+		"@dbg/report": "workspace:*",
 		"@dbg/store": "workspace:*",
 		"@dbg/tables-browser": "workspace:*",
 		"@dbg/tables-core": "workspace:*",
+		"@dbg/tables-dev": "workspace:*",
 		"@dbg/tables-native": "workspace:*",
-		"@dbg/types": "workspace:*"
+		"@dbg/tables-recorder": "workspace:*",
+		"@dbg/types": "workspace:*",
+		"@douglance/play": "^0.2.0",
+		"esbuild": "^0.28.1",
+		"incur": "^0.4.11"
 	},
 	"scripts": {
 		"build": "tsc -p tsconfig.json"

@@ -158,7 +158,7 @@ describe("query engine", () => {
 		};
 
 		const result = await executeQuery(
-			"SELECT severity, include, detail, window_ms FROM timeline WHERE include = 'errors' AND detail = 'full' AND window_ms = 0 ORDER BY ts DESC",
+			"SELECT severity, include, detail, window_ms FROM events_stream WHERE include = 'errors' AND detail = 'full' AND window_ms = 0 ORDER BY ts DESC",
 			timelineExecutor as unknown as Parameters<typeof executeQuery>[1],
 			registry,
 		);
